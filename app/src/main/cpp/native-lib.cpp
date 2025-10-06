@@ -24,7 +24,7 @@ Java_com_edgedetection_EdgeProcessor_initializeOpenCV(
     return EdgeProcessor::initialize();
 }
 
-extern "C" JNIEXPORT void JNICALL
+extern "C" JNIEXPORT jobject JNICALL
 Java_com_edgedetection_EdgeProcessor_processFrame(
         JNIEnv* env,
         jobject /* this */,
@@ -35,15 +35,18 @@ Java_com_edgedetection_EdgeProcessor_processFrame(
     
     if (AndroidBitmap_getInfo(env, bitmap, &info) < 0) {
         LOGE("Failed to get bitmap info");
-        return;
+        return nullptr;
     }
     
     if (AndroidBitmap_lockPixels(env, bitmap, &pixels) < 0) {
         LOGE("Failed to lock bitmap pixels");
-        return;
+        return nullptr;
     }
     
-    EdgeProcessor::processFrame(pixels, info.width, info.height);
+    // Create a copy of the bitmap for processing
+    jobject resultBitmap = EdgeProcessor::processFrameAndReturn(env, pixels, info.width, info.height, info.format);
     
     AndroidBitmap_unlockPixels(env, bitmap);
+    
+    return resultBitmap ? resultBitmap : bitmap;
 }

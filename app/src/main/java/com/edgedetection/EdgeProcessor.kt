@@ -4,12 +4,14 @@ import android.graphics.Bitmap
 
 class EdgeProcessor {
     
-    external fun initializeOpenCV(): Boolean
-    external fun processFrame(bitmap: Bitmap)
+    external fun processFrame(bitmap: Bitmap): Bitmap
     
     companion object {
         init {
             System.loadLibrary("edgedetection")
         }
+        
+        @JvmStatic
+        external fun initializeOpenCV(): Boolean
     }
 }
