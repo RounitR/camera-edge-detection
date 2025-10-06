@@ -47,7 +47,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Initialize OpenCV
-        EdgeProcessor.initializeOpenCV()
+        val openCvInitialized = EdgeProcessor.initializeOpenCV()
+        
+        // Test JNI connectivity
+        val jniTest = stringFromJNI()
+        android.util.Log.i("MainActivity", "JNI Test: $jniTest")
+        android.util.Log.i("MainActivity", "OpenCV Initialized: $openCvInitialized")
     }
 
     override fun onResume() {
