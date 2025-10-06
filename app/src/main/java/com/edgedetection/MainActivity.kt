@@ -2,8 +2,11 @@ package com.edgedetection
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.ImageFormat
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.*
+import android.media.Image
+import android.media.ImageReader
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
@@ -15,6 +18,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import java.nio.ByteBuffer
 
 class MainActivity : AppCompatActivity() {
 
@@ -33,6 +37,11 @@ class MainActivity : AppCompatActivity() {
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
     private var isEdgeDetectionEnabled = false
+    
+    // Frame capture components
+    private var imageReader: ImageReader? = null
+    private val frameWidth = 640
+    private val frameHeight = 480
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,6 +62,9 @@ class MainActivity : AppCompatActivity() {
         val jniTest = stringFromJNI()
         android.util.Log.i("MainActivity", "JNI Test: $jniTest")
         android.util.Log.i("MainActivity", "OpenCV Initialized: $openCvInitialized")
+        
+        // Setup ImageReader for frame capture
+        setupImageReader()
     }
 
     override fun onResume() {
@@ -115,17 +127,61 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun setupImageReader() {
+        imageReader = ImageReader.newInstance(frameWidth, frameHeight, ImageFormat.YUV_420_888, 2)
+        imageReader?.setOnImageAvailableListener(imageAvailableListener, backgroundHandler)
+    }
+    
+    private val imageAvailableListener = ImageReader.OnImageAvailableListener { reader ->
+        val image = reader.acquireLatestImage()
+        image?.let {
+            processFrame(it)
+            it.close()
+        }
+    }
+    
+    private fun processFrame(image: Image) {
+        if (!isEdgeDetectionEnabled) return
+        
+        try {
+            // Extract Y plane (grayscale) from YUV_420_888
+            val planes = image.planes
+            val yPlane = planes[0]
+            val yBuffer = yPlane.buffer
+            val ySize = yBuffer.remaining()
+            val yArray = ByteArray(ySize)
+            yBuffer.get(yArray)
+            
+            // Pass frame data to native layer
+            processFrameNative(
+                yArray,
+                image.width,
+                image.height,
+                yPlane.rowStride,
+                yPlane.pixelStride
+            )
+            
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Error processing frame: ${e.message}")
+        }
+    }
+
     private fun createCameraPreview() {
         try {
             val texture = textureView.surfaceTexture
             texture?.setDefaultBufferSize(1920, 1080)
             val surface = Surface(texture)
+            val imageReaderSurface = imageReader?.surface
 
             val captureRequestBuilder = cameraDevice?.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
             captureRequestBuilder?.addTarget(surface)
+            imageReaderSurface?.let { captureRequestBuilder?.addTarget(it) }
+
+            val surfaces = mutableListOf(surface)
+            imageReaderSurface?.let { surfaces.add(it) }
 
             cameraDevice?.createCaptureSession(
-                listOf(surface),
+                surfaces,
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
                         if (cameraDevice == null) return
@@ -159,6 +215,8 @@ class MainActivity : AppCompatActivity() {
         captureSession = null
         cameraDevice?.close()
         cameraDevice = null
+        imageReader?.close()
+        imageReader = null
     }
 
     private fun startBackgroundThread() {
@@ -195,4 +253,15 @@ class MainActivity : AppCompatActivity() {
      * which is packaged with this app.
      */
     external fun stringFromJNI(): String
+    
+    /**
+     * Native method to process frame data
+     */
+    external fun processFrameNative(
+        frameData: ByteArray,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        pixelStride: Int
+    )
 }

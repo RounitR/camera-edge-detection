@@ -50,3 +50,38 @@ Java_com_edgedetection_EdgeProcessor_processFrame(
     
     return resultBitmap ? resultBitmap : bitmap;
 }
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_edgedetection_MainActivity_processFrameNative(
+        JNIEnv* env,
+        jobject /* this */,
+        jbyteArray frameData,
+        jint width,
+        jint height,
+        jint rowStride,
+        jint pixelStride) {
+    
+    LOGI("Processing frame: %dx%d, rowStride=%d, pixelStride=%d", width, height, rowStride, pixelStride);
+    
+    // Get the frame data from Java byte array
+    jbyte* frameBytes = env->GetByteArrayElements(frameData, nullptr);
+    if (!frameBytes) {
+        LOGE("Failed to get frame data");
+        return;
+    }
+    
+    jsize frameSize = env->GetArrayLength(frameData);
+    LOGI("Frame data size: %d bytes", frameSize);
+    
+    // Process the frame data with EdgeProcessor
+    EdgeProcessor::processFrameData(
+        reinterpret_cast<uint8_t*>(frameBytes),
+        width,
+        height,
+        rowStride,
+        pixelStride
+    );
+    
+    // Release the frame data
+    env->ReleaseByteArrayElements(frameData, frameBytes, JNI_ABORT);
+}

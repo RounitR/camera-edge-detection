@@ -49,6 +49,42 @@ void EdgeProcessor::processFrame(void* pixels, int width, int height) {
     }
 }
 
+void EdgeProcessor::processFrameData(uint8_t* frameData, int width, int height, int rowStride, int pixelStride) {
+    if (!isInitialized) {
+        LOGE("EdgeProcessor not initialized");
+        return;
+    }
+    
+    try {
+        // Create OpenCV Mat from Y plane data (grayscale)
+        cv::Mat yPlane(height, width, CV_8UC1, frameData, rowStride);
+        cv::Mat gray, edges;
+        
+        // Copy to ensure contiguous memory if needed
+        if (rowStride != width) {
+            yPlane.copyTo(gray);
+        } else {
+            gray = yPlane;
+        }
+        
+        // Apply Gaussian blur to reduce noise
+        cv::GaussianBlur(gray, gray, cv::Size(5, 5), 1.4);
+        
+        // Apply Canny edge detection
+        cv::Canny(gray, edges, lowThreshold, highThreshold);
+        
+        // Log processing info (limit frequency to avoid spam)
+        static int frameCount = 0;
+        if (frameCount % 30 == 0) {  // Log every 30 frames
+            LOGI("Processed frame %d: %dx%d, edges detected", frameCount, width, height);
+        }
+        frameCount++;
+        
+    } catch (const std::exception& e) {
+        LOGE("Error processing frame data: %s", e.what());
+    }
+}
+
 void EdgeProcessor::setCannyThresholds(double low, double high) {
     lowThreshold = low;
     highThreshold = high;

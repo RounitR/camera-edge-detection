@@ -10,6 +10,7 @@ public:
     static bool initialize();
     static void processFrame(void* pixels, int width, int height);
     static jobject processFrameAndReturn(JNIEnv* env, void* pixels, int width, int height, int format);
+    static void processFrameData(uint8_t* frameData, int width, int height, int rowStride, int pixelStride);
     static void setCannyThresholds(double lowThreshold, double highThreshold);
     
 private:
