@@ -90,6 +90,16 @@ class EdgeRenderer : GLSurfaceView.Renderer {
     private var isOriginalFrameReady: Boolean = false
     private var isProcessedFrameReady: Boolean = false
     
+    // GL state optimization
+    private var lastBoundTexture: Int = -1
+    private var lastUsedProgram: Int = -1
+    private var vertexArraysEnabled: Boolean = false
+    
+    // Frame synchronization
+    private var frameCounter: Long = 0
+    private var lastFrameTime: Long = 0
+    private val targetFrameTime: Long = 33 // ~30 FPS (33ms per frame)
+    
     init {
         // Initialize vertex buffer
         val bb = ByteBuffer.allocateDirect(QUAD_VERTICES.size * 4)
@@ -156,28 +166,47 @@ class EdgeRenderer : GLSurfaceView.Renderer {
     }
     
     override fun onDrawFrame(gl: GL10?) {
+        // Frame synchronization
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - lastFrameTime < targetFrameTime) {
+            return // Skip frame to maintain target FPS
+        }
+        lastFrameTime = currentTime
+        frameCounter++
+        
         // Clear the screen
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         
-        // Use our shader program
-        GLES20.glUseProgram(shaderProgram)
+        // Use our shader program (only if different)
+        if (lastUsedProgram != shaderProgram) {
+            GLES20.glUseProgram(shaderProgram)
+            lastUsedProgram = shaderProgram
+        }
         
         // Update texture if new frame data is available
         updateTexture()
         
-        // Bind the appropriate texture based on current mode
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        if (showProcessedFrame) {
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, processedTextureIds[currentProcessedBuffer])
+        // Determine which texture to use
+        val targetTexture = if (showProcessedFrame) {
+            processedTextureIds[currentProcessedBuffer]
         } else {
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, cameraTextureIds[currentCameraBuffer])
+            cameraTextureIds[currentCameraBuffer]
+        }
+        
+        // Bind texture only if different from last bound
+        if (lastBoundTexture != targetTexture) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, targetTexture)
+            lastBoundTexture = targetTexture
         }
         
         // Draw the quad
         drawQuad()
         
-        // Check for OpenGL errors
-        checkGLError("onDrawFrame")
+        // Check for OpenGL errors (less frequently for performance)
+        if (frameCounter % 60 == 0L) {
+            checkGLError("onDrawFrame")
+        }
     }
     
     private fun createShaderProgram(vertexShaderCode: String, fragmentShaderCode: String): Int {
@@ -294,23 +323,27 @@ class EdgeRenderer : GLSurfaceView.Renderer {
     }
     
     private fun drawQuad() {
-        // Enable vertex arrays
-        GLES20.glEnableVertexAttribArray(positionHandle)
-        GLES20.glEnableVertexAttribArray(texCoordHandle)
-        
-        // Prepare the coordinate data
-        vertexBuffer.position(0)
-        GLES20.glVertexAttribPointer(
-            positionHandle, COORDS_PER_VERTEX,
-            GLES20.GL_FLOAT, false, VERTEX_STRIDE, vertexBuffer
-        )
-        
-        // Prepare the texture coordinate data
-        vertexBuffer.position(COORDS_PER_VERTEX)
-        GLES20.glVertexAttribPointer(
-            texCoordHandle, TEXTURE_COORDS_PER_VERTEX,
-            GLES20.GL_FLOAT, false, VERTEX_STRIDE, vertexBuffer
-        )
+        // Enable vertex arrays only if not already enabled
+        if (!vertexArraysEnabled) {
+            GLES20.glEnableVertexAttribArray(positionHandle)
+            GLES20.glEnableVertexAttribArray(texCoordHandle)
+            
+            // Prepare the coordinate data
+            vertexBuffer.position(0)
+            GLES20.glVertexAttribPointer(
+                positionHandle, COORDS_PER_VERTEX,
+                GLES20.GL_FLOAT, false, VERTEX_STRIDE, vertexBuffer
+            )
+            
+            // Prepare the texture coordinate data
+            vertexBuffer.position(COORDS_PER_VERTEX)
+            GLES20.glVertexAttribPointer(
+                texCoordHandle, TEXTURE_COORDS_PER_VERTEX,
+                GLES20.GL_FLOAT, false, VERTEX_STRIDE, vertexBuffer
+            )
+            
+            vertexArraysEnabled = true
+        }
         
         // Set uniforms
         GLES20.glUniformMatrix4fv(mvpMatrixHandle, 1, false, mvpMatrix, 0)
@@ -319,10 +352,6 @@ class EdgeRenderer : GLSurfaceView.Renderer {
         
         // Draw the quad
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-        
-        // Disable vertex arrays
-        GLES20.glDisableVertexAttribArray(positionHandle)
-        GLES20.glDisableVertexAttribArray(texCoordHandle)
     }
     
     private fun checkGLError(operation: String) {
