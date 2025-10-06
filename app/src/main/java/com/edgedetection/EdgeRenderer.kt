@@ -66,9 +66,11 @@ class EdgeRenderer : GLSurfaceView.Renderer {
     // Vertex buffer
     private lateinit var vertexBuffer: FloatBuffer
     
-    // Texture IDs
-    private var cameraTextureId: Int = 0
-    private var processedTextureId: Int = 0
+    // Texture IDs for double-buffering (ping-pong buffers)
+    private var cameraTextureIds = IntArray(2)
+    private var processedTextureIds = IntArray(2)
+    private var currentCameraBuffer = 0
+    private var currentProcessedBuffer = 0
     
     // Matrices
     private val mvpMatrix = FloatArray(16)
@@ -117,15 +119,19 @@ class EdgeRenderer : GLSurfaceView.Renderer {
         textureHandle = GLES20.glGetUniformLocation(shaderProgram, "uTexture")
         alphaHandle = GLES20.glGetUniformLocation(shaderProgram, "uAlpha")
         
-        // Generate textures
-        val textures = IntArray(2)
-        GLES20.glGenTextures(2, textures, 0)
-        cameraTextureId = textures[0]
-        processedTextureId = textures[1]
+        // Generate textures for double-buffering
+        val textures = IntArray(4)
+        GLES20.glGenTextures(4, textures, 0)
+        cameraTextureIds[0] = textures[0]
+        cameraTextureIds[1] = textures[1]
+        processedTextureIds[0] = textures[2]
+        processedTextureIds[1] = textures[3]
         
-        // Configure textures
-        configureTexture(cameraTextureId)
-        configureTexture(processedTextureId)
+        // Configure all textures
+        configureTexture(cameraTextureIds[0])
+        configureTexture(cameraTextureIds[1])
+        configureTexture(processedTextureIds[0])
+        configureTexture(processedTextureIds[1])
         
         Log.i(TAG, "OpenGL setup complete. Program: $shaderProgram")
     }
@@ -158,6 +164,14 @@ class EdgeRenderer : GLSurfaceView.Renderer {
         
         // Update texture if new frame data is available
         updateTexture()
+        
+        // Bind the appropriate texture based on current mode
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        if (showProcessedFrame) {
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, processedTextureIds[currentProcessedBuffer])
+        } else {
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, cameraTextureIds[currentCameraBuffer])
+        }
         
         // Draw the quad
         drawQuad()
@@ -218,9 +232,11 @@ class EdgeRenderer : GLSurfaceView.Renderer {
     
     private fun updateTexture() {
         synchronized(this) {
-            // Update original frame texture
+            // Update original frame texture using double-buffering
             if (isOriginalFrameReady && pendingOriginalFrameData != null) {
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, cameraTextureId)
+                // Switch to next buffer for upload
+                val uploadBuffer = (currentCameraBuffer + 1) % 2
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, cameraTextureIds[uploadBuffer])
                 
                 // Convert grayscale data to RGBA for OpenGL
                 val rgbaData = convertGrayscaleToRGBA(pendingOriginalFrameData!!)
@@ -234,12 +250,16 @@ class EdgeRenderer : GLSurfaceView.Renderer {
                     GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer
                 )
                 
+                // Switch to the newly uploaded buffer for rendering
+                currentCameraBuffer = uploadBuffer
                 isOriginalFrameReady = false
             }
             
-            // Update processed frame texture
+            // Update processed frame texture using double-buffering
             if (isProcessedFrameReady && pendingProcessedFrameData != null) {
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, processedTextureId)
+                // Switch to next buffer for upload
+                val uploadBuffer = (currentProcessedBuffer + 1) % 2
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, processedTextureIds[uploadBuffer])
                 
                 // Convert grayscale data to RGBA for OpenGL
                 val rgbaData = convertGrayscaleToRGBA(pendingProcessedFrameData!!)
@@ -253,6 +273,8 @@ class EdgeRenderer : GLSurfaceView.Renderer {
                     GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer
                 )
                 
+                // Switch to the newly uploaded buffer for rendering
+                currentProcessedBuffer = uploadBuffer
                 isProcessedFrameReady = false
             }
         }
