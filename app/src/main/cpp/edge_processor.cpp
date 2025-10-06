@@ -6,9 +6,14 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 // Static member initialization
-double EdgeProcessor::lowThreshold = 50.0;
-double EdgeProcessor::highThreshold = 150.0;
+double EdgeProcessor::lowThreshold = 30.0;  // Optimized for mobile cameras
+double EdgeProcessor::highThreshold = 80.0;  // Optimized for mobile cameras
 bool EdgeProcessor::isInitialized = false;
+
+// Static buffers for memory reuse
+static cv::Mat grayBuffer;
+static cv::Mat edgesBuffer;
+static cv::Mat blurBuffer;
 
 bool EdgeProcessor::initialize() {
     try {
@@ -30,19 +35,25 @@ void EdgeProcessor::processFrame(void* pixels, int width, int height) {
     try {
         // Create OpenCV Mat from RGBA pixels
         cv::Mat rgba(height, width, CV_8UC4, pixels);
-        cv::Mat gray, edges;
+        
+        // Ensure buffers are properly sized
+        if (grayBuffer.size() != cv::Size(width, height)) {
+            grayBuffer.create(height, width, CV_8UC1);
+            blurBuffer.create(height, width, CV_8UC1);
+            edgesBuffer.create(height, width, CV_8UC1);
+        }
         
         // Convert to grayscale
-        cv::cvtColor(rgba, gray, cv::COLOR_RGBA2GRAY);
+        cv::cvtColor(rgba, grayBuffer, cv::COLOR_RGBA2GRAY);
         
-        // Apply Gaussian blur to reduce noise
-        cv::GaussianBlur(gray, gray, cv::Size(5, 5), 1.4);
+        // Apply optimized Gaussian blur to reduce noise
+        cv::GaussianBlur(grayBuffer, blurBuffer, cv::Size(3, 3), 0.8);
         
-        // Apply Canny edge detection
-        cv::Canny(gray, edges, lowThreshold, highThreshold);
+        // Apply Canny edge detection with optimized parameters
+        cv::Canny(blurBuffer, edgesBuffer, lowThreshold, highThreshold, 3, false);
         
         // Convert edges back to RGBA for display
-        cv::cvtColor(edges, rgba, cv::COLOR_GRAY2RGBA);
+        cv::cvtColor(edgesBuffer, rgba, cv::COLOR_GRAY2RGBA);
         
     } catch (const std::exception& e) {
         LOGE("Error processing frame: %s", e.what());
@@ -58,25 +69,35 @@ void EdgeProcessor::processFrameData(uint8_t* frameData, int width, int height, 
     try {
         // Create OpenCV Mat from Y plane data (grayscale)
         cv::Mat yPlane(height, width, CV_8UC1, frameData, rowStride);
-        cv::Mat gray, edges;
+        
+        // Ensure buffers are properly sized (reuse for performance)
+        if (grayBuffer.size() != cv::Size(width, height)) {
+            grayBuffer.create(height, width, CV_8UC1);
+            blurBuffer.create(height, width, CV_8UC1);
+            edgesBuffer.create(height, width, CV_8UC1);
+            LOGI("Allocated processing buffers for %dx%d", width, height);
+        }
         
         // Copy to ensure contiguous memory if needed
         if (rowStride != width) {
-            yPlane.copyTo(gray);
+            yPlane.copyTo(grayBuffer);
         } else {
-            gray = yPlane;
+            grayBuffer = yPlane.clone();  // Clone to avoid modifying original
         }
         
-        // Apply Gaussian blur to reduce noise
-        cv::GaussianBlur(gray, gray, cv::Size(5, 5), 1.4);
+        // Apply optimized Gaussian blur to reduce noise
+        cv::GaussianBlur(grayBuffer, blurBuffer, cv::Size(3, 3), 0.8);
         
-        // Apply Canny edge detection
-        cv::Canny(gray, edges, lowThreshold, highThreshold);
+        // Apply Canny edge detection with optimized parameters
+        cv::Canny(blurBuffer, edgesBuffer, lowThreshold, highThreshold, 3, false);
         
         // Log processing info (limit frequency to avoid spam)
         static int frameCount = 0;
-        if (frameCount % 30 == 0) {  // Log every 30 frames
-            LOGI("Processed frame %d: %dx%d, edges detected", frameCount, width, height);
+        if (frameCount % 60 == 0) {  // Log every 60 frames (every 2 seconds at 30fps)
+            int edgePixels = cv::countNonZero(edgesBuffer);
+            double edgeRatio = (double)edgePixels / (width * height) * 100.0;
+            LOGI("Frame %d: %dx%d, %.1f%% edge pixels, thresholds: %.1f/%.1f", 
+                 frameCount, width, height, edgeRatio, lowThreshold, highThreshold);
         }
         frameCount++;
         
@@ -100,19 +121,26 @@ jobject EdgeProcessor::processFrameAndReturn(JNIEnv* env, void* pixels, int widt
     try {
         // Create OpenCV Mat from RGBA pixels
         cv::Mat rgba(height, width, CV_8UC4, pixels);
-        cv::Mat gray, edges, result;
+        cv::Mat result;
+        
+        // Ensure buffers are properly sized
+        if (grayBuffer.size() != cv::Size(width, height)) {
+            grayBuffer.create(height, width, CV_8UC1);
+            blurBuffer.create(height, width, CV_8UC1);
+            edgesBuffer.create(height, width, CV_8UC1);
+        }
         
         // Convert to grayscale
-        cv::cvtColor(rgba, gray, cv::COLOR_RGBA2GRAY);
+        cv::cvtColor(rgba, grayBuffer, cv::COLOR_RGBA2GRAY);
         
-        // Apply Gaussian blur to reduce noise
-        cv::GaussianBlur(gray, gray, cv::Size(5, 5), 1.4);
+        // Apply optimized Gaussian blur to reduce noise
+        cv::GaussianBlur(grayBuffer, blurBuffer, cv::Size(3, 3), 0.8);
         
-        // Apply Canny edge detection
-        cv::Canny(gray, edges, lowThreshold, highThreshold);
+        // Apply Canny edge detection with optimized parameters
+        cv::Canny(blurBuffer, edgesBuffer, lowThreshold, highThreshold, 3, false);
         
         // Convert edges back to RGBA for display
-        cv::cvtColor(edges, result, cv::COLOR_GRAY2RGBA);
+        cv::cvtColor(edgesBuffer, result, cv::COLOR_GRAY2RGBA);
         
         // Create and return new bitmap
         return createBitmapFromMat(env, result);
