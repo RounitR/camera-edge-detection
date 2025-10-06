@@ -19,6 +19,10 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import java.nio.ByteBuffer
+import java.util.concurrent.BlockingQueue
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.min
 
 class MainActivity : AppCompatActivity() {
 
@@ -42,6 +46,29 @@ class MainActivity : AppCompatActivity() {
     private var imageReader: ImageReader? = null
     private val frameWidth = 640
     private val frameHeight = 480
+    
+    // Processing thread components
+    private var processingThread: HandlerThread? = null
+    private var processingHandler: Handler? = null
+    private val frameQueue: BlockingQueue<FrameData> = LinkedBlockingQueue(3) // Limit queue size
+    
+    // Performance monitoring
+    private val frameCount = AtomicLong(0)
+    private val processedFrameCount = AtomicLong(0)
+    private var lastFpsTime = System.currentTimeMillis()
+    private var lastProcessTime = System.currentTimeMillis()
+    private val targetFps = 15.0 // Target 15 FPS
+    private val minFrameInterval = (1000.0 / targetFps).toLong() // ~67ms between frames
+    
+    // Frame data class for queue
+    data class FrameData(
+        val data: ByteArray,
+        val width: Int,
+        val height: Int,
+        val rowStride: Int,
+        val pixelStride: Int,
+        val timestamp: Long
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,6 +92,9 @@ class MainActivity : AppCompatActivity() {
         
         // Setup ImageReader for frame capture
         setupImageReader()
+        
+        // Start processing thread
+        startProcessingThread()
     }
 
     override fun onResume() {
@@ -81,6 +111,7 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         closeCamera()
         stopBackgroundThread()
+        stopProcessingThread()
         super.onPause()
     }
 
@@ -143,6 +174,14 @@ class MainActivity : AppCompatActivity() {
     private fun processFrame(image: Image) {
         if (!isEdgeDetectionEnabled) return
         
+        val currentTime = System.currentTimeMillis()
+        frameCount.incrementAndGet()
+        
+        // FPS limiting - skip frame if too soon
+        if (currentTime - lastProcessTime < minFrameInterval) {
+            return
+        }
+        
         try {
             // Extract Y plane (grayscale) from YUV_420_888
             val planes = image.planes
@@ -152,14 +191,38 @@ class MainActivity : AppCompatActivity() {
             val yArray = ByteArray(ySize)
             yBuffer.get(yArray)
             
-            // Pass frame data to native layer
-            processFrameNative(
+            // Create frame data
+            val frameData = FrameData(
                 yArray,
                 image.width,
                 image.height,
                 yPlane.rowStride,
-                yPlane.pixelStride
+                yPlane.pixelStride,
+                currentTime
             )
+            
+            // Add to queue (non-blocking, drops frame if queue is full)
+            if (!frameQueue.offer(frameData)) {
+                android.util.Log.d("MainActivity", "Frame queue full, dropping frame")
+            }
+            
+            lastProcessTime = currentTime
+            
+            // Log performance metrics every 2 seconds
+            if (currentTime - lastFpsTime >= 2000) {
+                val totalFrames = frameCount.get()
+                val processedFrames = processedFrameCount.get()
+                val inputFps = totalFrames * 1000.0 / (currentTime - lastFpsTime + 2000)
+                val processingFps = processedFrames * 1000.0 / (currentTime - lastFpsTime + 2000)
+                
+                android.util.Log.i("MainActivity", 
+                    "Performance - Input FPS: %.1f, Processing FPS: %.1f, Queue size: %d"
+                    .format(inputFps, processingFps, frameQueue.size))
+                
+                frameCount.set(0)
+                processedFrameCount.set(0)
+                lastFpsTime = currentTime
+            }
             
         } catch (e: Exception) {
             android.util.Log.e("MainActivity", "Error processing frame: ${e.message}")
@@ -217,6 +280,57 @@ class MainActivity : AppCompatActivity() {
         cameraDevice = null
         imageReader?.close()
         imageReader = null
+    }
+
+    private fun startProcessingThread() {
+        processingThread = HandlerThread("Frame Processing")
+        processingThread?.start()
+        processingHandler = Handler(processingThread?.looper!!)
+        
+        // Start the frame processing loop
+        processingHandler?.post(frameProcessingRunnable)
+    }
+    
+    private fun stopProcessingThread() {
+        frameQueue.clear()
+        processingThread?.quitSafely()
+        try {
+            processingThread?.join()
+            processingThread = null
+            processingHandler = null
+        } catch (e: InterruptedException) {
+            e.printStackTrace()
+        }
+    }
+    
+    private val frameProcessingRunnable = object : Runnable {
+        override fun run() {
+            try {
+                // Take frame from queue (blocking)
+                val frameData = frameQueue.take()
+                
+                // Process the frame
+                processFrameNative(
+                    frameData.data,
+                    frameData.width,
+                    frameData.height,
+                    frameData.rowStride,
+                    frameData.pixelStride
+                )
+                
+                processedFrameCount.incrementAndGet()
+                
+                // Continue processing
+                processingHandler?.post(this)
+                
+            } catch (e: InterruptedException) {
+                android.util.Log.d("MainActivity", "Processing thread interrupted")
+            } catch (e: Exception) {
+                android.util.Log.e("MainActivity", "Error in processing thread: ${e.message}")
+                // Continue processing even after error
+                processingHandler?.post(this)
+            }
+        }
     }
 
     private fun startBackgroundThread() {
