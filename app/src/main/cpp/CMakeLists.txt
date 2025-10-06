@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Set OpenCV directory
-set(OpenCV_DIR ${OPENCV_ANDROID_HOME}/sdk/native/jni)
+set(OpenCV_DIR ${OPENCV_ANDROID_HOME}/native/jni)
 
 # Find OpenCV
 find_package(OpenCV REQUIRED java)
