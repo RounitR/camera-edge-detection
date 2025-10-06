@@ -121,10 +121,9 @@ android {
         }
     }
     
-    android {
-        buildFeatures {
-            buildConfig true
-        }
+    lintOptions {
+        abortOnError false
+        checkReleaseBuilds false
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8

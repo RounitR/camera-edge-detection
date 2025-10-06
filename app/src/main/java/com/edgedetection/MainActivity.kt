@@ -7,12 +7,14 @@ import android.graphics.SurfaceTexture
 import android.hardware.camera2.*
 import android.media.Image
 import android.media.ImageReader
+import android.opengl.GLSurfaceView
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Size
 import android.view.Surface
 import android.view.TextureView
+import android.view.View
 import android.widget.Button
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -35,7 +37,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private lateinit var textureView: TextureView
+    private lateinit var glSurfaceView: GLSurfaceView
     private lateinit var toggleButton: Button
+    private lateinit var edgeRenderer: EdgeRenderer
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
     private var backgroundThread: HandlerThread? = null
@@ -75,11 +79,29 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         textureView = findViewById(R.id.textureView)
+        glSurfaceView = findViewById(R.id.glSurfaceView)
         toggleButton = findViewById(R.id.toggleButton)
+
+        // Initialize OpenGL renderer
+        edgeRenderer = EdgeRenderer()
+        glSurfaceView.setEGLContextClientVersion(2)
+        glSurfaceView.setRenderer(edgeRenderer)
+        glSurfaceView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
 
         toggleButton.setOnClickListener {
             isEdgeDetectionEnabled = !isEdgeDetectionEnabled
             toggleButton.text = if (isEdgeDetectionEnabled) "Disable Edge Detection" else "Enable Edge Detection"
+            
+            // Switch between TextureView and GLSurfaceView
+            if (isEdgeDetectionEnabled) {
+                textureView.visibility = View.GONE
+                glSurfaceView.visibility = View.VISIBLE
+                edgeRenderer.setShowProcessedFrame(true)
+            } else {
+                glSurfaceView.visibility = View.GONE
+                textureView.visibility = View.VISIBLE
+                edgeRenderer.setShowProcessedFrame(false)
+            }
         }
 
         // Initialize OpenCV
@@ -106,9 +128,12 @@ class MainActivity : AppCompatActivity() {
         } else {
             textureView.surfaceTextureListener = textureListener
         }
+        
+        glSurfaceView.onResume()
     }
 
     override fun onPause() {
+        glSurfaceView.onPause()
         closeCamera()
         stopBackgroundThread()
         stopProcessingThread()
@@ -309,14 +334,30 @@ class MainActivity : AppCompatActivity() {
                 // Take frame from queue (blocking)
                 val frameData = frameQueue.take()
                 
-                // Process the frame
-                processFrameNative(
+                // Send original frame data to renderer
+                edgeRenderer.updateOriginalFrame(
+                    frameData.data,
+                    frameData.width,
+                    frameData.height
+                )
+                
+                // Process the frame and get result
+                val processedData = processFrameAndReturn(
                     frameData.data,
                     frameData.width,
                     frameData.height,
                     frameData.rowStride,
                     frameData.pixelStride
                 )
+                
+                // Send processed frame data to renderer
+                processedData?.let {
+                    edgeRenderer.updateProcessedFrame(
+                        it,
+                        frameData.width,
+                        frameData.height
+                    )
+                }
                 
                 processedFrameCount.incrementAndGet()
                 
@@ -378,4 +419,12 @@ class MainActivity : AppCompatActivity() {
         rowStride: Int,
         pixelStride: Int
     )
+    
+    external fun processFrameAndReturn(
+        frameData: ByteArray,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        pixelStride: Int
+    ): ByteArray?
 }

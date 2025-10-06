@@ -85,3 +85,50 @@ Java_com_edgedetection_MainActivity_processFrameNative(
     // Release the frame data
     env->ReleaseByteArrayElements(frameData, frameBytes, JNI_ABORT);
 }
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_com_edgedetection_MainActivity_processFrameAndReturn(
+        JNIEnv* env,
+        jobject /* this */,
+        jbyteArray frameData,
+        jint width,
+        jint height,
+        jint rowStride,
+        jint pixelStride) {
+    
+    // Get the frame data from Java byte array
+    jbyte* frameBytes = env->GetByteArrayElements(frameData, nullptr);
+    if (!frameBytes) {
+        LOGE("Failed to get frame data");
+        return nullptr;
+    }
+    
+    // Process the frame data with EdgeProcessor and get result
+    uint8_t* processedData = EdgeProcessor::processFrameDataAndReturn(
+        reinterpret_cast<uint8_t*>(frameBytes),
+        width,
+        height,
+        rowStride,
+        pixelStride
+    );
+    
+    // Release the input frame data
+    env->ReleaseByteArrayElements(frameData, frameBytes, JNI_ABORT);
+    
+    if (!processedData) {
+        LOGE("Failed to process frame data");
+        return nullptr;
+    }
+    
+    // Create Java byte array for the processed data
+    jsize resultSize = width * height; // Grayscale output
+    jbyteArray result = env->NewByteArray(resultSize);
+    if (!result) {
+        LOGE("Failed to create result byte array");
+        return nullptr;
+    }
+    
+    env->SetByteArrayRegion(result, 0, resultSize, reinterpret_cast<jbyte*>(processedData));
+    
+    return result;
+}

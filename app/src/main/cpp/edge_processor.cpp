@@ -180,3 +180,59 @@ jobject EdgeProcessor::createBitmapFromMat(JNIEnv* env, const cv::Mat& mat) {
     
     return bitmap;
 }
+
+uint8_t* EdgeProcessor::processFrameDataAndReturn(uint8_t* frameData, int width, int height, int rowStride, int pixelStride) {
+    if (!isInitialized) {
+        LOGE("EdgeProcessor not initialized");
+        return nullptr;
+    }
+    
+    try {
+        // Create OpenCV Mat from Y plane data (grayscale)
+        cv::Mat yPlane(height, width, CV_8UC1, frameData, rowStride);
+        
+        // Ensure we have proper buffer sizing
+        if (grayBuffer.rows != height || grayBuffer.cols != width) {
+            grayBuffer = cv::Mat::zeros(height, width, CV_8UC1);
+            edgesBuffer = cv::Mat::zeros(height, width, CV_8UC1);
+            blurBuffer = cv::Mat::zeros(height, width, CV_8UC1);
+        }
+        
+        // Handle rowStride differences
+        if (rowStride != width) {
+            // Copy to contiguous buffer
+            for (int i = 0; i < height; i++) {
+                memcpy(grayBuffer.ptr(i), yPlane.ptr(i), width);
+            }
+        } else {
+            grayBuffer = yPlane.clone();
+        }
+        
+        // Apply Gaussian blur to reduce noise
+        cv::GaussianBlur(grayBuffer, blurBuffer, cv::Size(5, 5), 1.4);
+        
+        // Apply Canny edge detection
+        cv::Canny(blurBuffer, edgesBuffer, lowThreshold, highThreshold);
+        
+        // Allocate result buffer
+        uint8_t* result = new uint8_t[width * height];
+        
+        // Copy processed data to result buffer
+        if (edgesBuffer.isContinuous()) {
+            memcpy(result, edgesBuffer.data, width * height);
+        } else {
+            for (int i = 0; i < height; i++) {
+                memcpy(result + i * width, edgesBuffer.ptr(i), width);
+            }
+        }
+        
+        return result;
+        
+    } catch (const cv::Exception& e) {
+        LOGE("OpenCV exception in processFrameDataAndReturn: %s", e.what());
+        return nullptr;
+    } catch (const std::exception& e) {
+        LOGE("Exception in processFrameDataAndReturn: %s", e.what());
+        return nullptr;
+    }
+}
