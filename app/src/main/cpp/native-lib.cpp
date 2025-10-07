@@ -109,3 +109,13 @@ Java_com_edgedetection_MainActivity_00024Companion_processFrameAndReturn(
     
     return result;
 }
+
+// JNI export to set Canny thresholds from Kotlin UI
+extern "C" JNIEXPORT void JNICALL
+Java_com_edgedetection_MainActivity_00024Companion_setCannyThresholds(
+        JNIEnv* env,
+        jobject /* this */,
+        jdouble low,
+        jdouble high) {
+    EdgeProcessor::setCannyThresholds(static_cast<double>(low), static_cast<double>(high));
+}

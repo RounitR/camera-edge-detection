@@ -16,6 +16,7 @@ import android.view.Surface
 import android.view.TextureView
 import android.view.View
 import android.widget.Button
+import android.widget.SeekBar
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -38,6 +39,7 @@ class MainActivity : AppCompatActivity() {
         external fun processFrameNative(frameData: ByteArray, width: Int, height: Int, rowStride: Int, pixelStride: Int)
         external fun processFrameAndReturn(frameData: ByteArray, width: Int, height: Int, rowStride: Int, pixelStride: Int): ByteArray?
         external fun initializeOpenCV(): Boolean
+        external fun setCannyThresholds(low: Double, high: Double)
         
         fun loadNativeLibrary(): Boolean {
             if (!isNativeLibraryLoaded) {
@@ -62,7 +64,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private lateinit var textureView: TextureView
+    // Removed TextureView; we render via GLSurfaceView only
     private lateinit var glSurfaceView: GLSurfaceView
     private lateinit var toggleButton: Button
     private lateinit var edgeRenderer: EdgeRenderer
@@ -80,7 +82,7 @@ class MainActivity : AppCompatActivity() {
     // Processing thread components
     private var processingThread: HandlerThread? = null
     private var processingHandler: Handler? = null
-    private val frameQueue: BlockingQueue<FrameData> = LinkedBlockingQueue(3) // Limit queue size
+    private val frameQueue: BlockingQueue<FrameData> = LinkedBlockingQueue(1) // Limit queue size to 1 for stronger backpressure
     
     // Performance monitoring
     private val frameCount = AtomicLong(0)
@@ -108,85 +110,71 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        textureView = findViewById(R.id.textureView)
+        // GLSurfaceView is the only visible surface; no TextureView
         glSurfaceView = findViewById(R.id.glSurfaceView)
         toggleButton = findViewById(R.id.toggleButton)
+        val lowSeek: SeekBar = findViewById(R.id.lowThresholdSeekBar)
+        val highSeek: SeekBar = findViewById(R.id.highThresholdSeekBar)
 
         // Initialize OpenGL renderer
         edgeRenderer = EdgeRenderer()
         glSurfaceView.setEGLContextClientVersion(2)
         glSurfaceView.setRenderer(edgeRenderer)
         glSurfaceView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
-        
-        // Set GLSurfaceView reference in renderer for requestRender() calls
         edgeRenderer.setGLSurfaceView(glSurfaceView)
+
+        // Initial state: edge detection ON, GLSurfaceView visible
+        isEdgeDetectionEnabled = true
+        edgeRenderer.setShowProcessedFrame(true)
+        toggleButton.text = "Disable Edge Detection"
 
         toggleButton.setOnClickListener {
             isEdgeDetectionEnabled = !isEdgeDetectionEnabled
             toggleButton.text = if (isEdgeDetectionEnabled) "Disable Edge Detection" else "Enable Edge Detection"
-            
-            android.util.Log.d("MainActivity", "Edge detection toggled: $isEdgeDetectionEnabled")
-            
-            // Switch between TextureView and GLSurfaceView
-            if (isEdgeDetectionEnabled) {
-                android.util.Log.d("MainActivity", "Switching to GLSurfaceView for edge detection")
-                textureView.visibility = View.GONE
-                glSurfaceView.visibility = View.VISIBLE
-                edgeRenderer.setShowProcessedFrame(true)
-            } else {
-                android.util.Log.d("MainActivity", "Switching to TextureView for normal camera")
-                glSurfaceView.visibility = View.GONE
-                textureView.visibility = View.VISIBLE
-                edgeRenderer.setShowProcessedFrame(false)
-            }
+            edgeRenderer.setShowProcessedFrame(isEdgeDetectionEnabled)
         }
 
-        // Removed early EdgeProcessor initialization to ensure native libraries are loaded first
-        // android.util.Log.i("MainActivity", "Deferring EdgeProcessor initialization to onResume after native libraries and OpenCV are loaded")
-        
-        // Setup ImageReader for frame capture
+        // Threshold SeekBars -> native thresholds
+        lowSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                findViewById<android.widget.TextView>(R.id.lowThresholdLabel).text = "Low Threshold: $progress"
+                setCannyThresholds(progress.toDouble(), highSeek.progress.toDouble())
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        highSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                findViewById<android.widget.TextView>(R.id.highThresholdLabel).text = "High Threshold: $progress"
+                setCannyThresholds(lowSeek.progress.toDouble(), progress.toDouble())
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+
+        // Setup ImageReader and processing
         setupImageReader()
-        
-        // Start processing thread
         startProcessingThread()
     }
 
     override fun onResume() {
         super.onResume()
         startBackgroundThread()
-        
-        // Load native dependencies first to ensure proper symbol resolution
         loadNativeLibrary()
-        
-        // Initialize OpenCV using initDebug (will succeed if opencv_java4 already loaded)
         if (OpenCVLoader.initDebug()) {
             android.util.Log.d("MainActivity", "OpenCV loaded via initDebug")
         } else {
             android.util.Log.e("MainActivity", "Failed to load OpenCV via initDebug")
         }
-        
-        // Initialize native OpenCV and EdgeProcessor (no fallback)
-        val edgeProcessorInitialized = try {
-            initializeOpenCV()
-        } catch (e: UnsatisfiedLinkError) {
-            android.util.Log.e("MainActivity", "UnsatisfiedLinkError during initializeOpenCV: ${e.message}")
-            false
-        } catch (e: Exception) {
-            android.util.Log.e("MainActivity", "Error during initializeOpenCV: ${e.message}")
-            false
-        }
-        android.util.Log.i("MainActivity", "EdgeProcessor Initialized (onResume): $edgeProcessorInitialized")
-        if (!edgeProcessorInitialized) {
+        val ok = try { initializeOpenCV() } catch (e: Throwable) { false }
+        if (!ok) {
             Toast.makeText(this, "Failed to initialize edge detection.", Toast.LENGTH_LONG).show()
         }
-        
-        if (textureView.isAvailable) {
-            openCamera()
-        } else {
-            textureView.surfaceTextureListener = textureListener
-        }
-        
+        // No TextureView. Open camera immediately.
+        openCamera()
         glSurfaceView.onResume()
+        setCannyThresholds(findViewById<SeekBar>(R.id.lowThresholdSeekBar).progress.toDouble(),
+            findViewById<SeekBar>(R.id.highThresholdSeekBar).progress.toDouble())
     }
 
     override fun onPause() {
@@ -197,15 +185,7 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
     }
 
-    private val textureListener = object : TextureView.SurfaceTextureListener {
-        override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-            openCamera()
-        }
-
-        override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
-        override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
-        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
-    }
+    private val textureListener = object : TextureView.SurfaceTextureListener { /* removed */ }
 
     private fun openCamera() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
@@ -254,26 +234,19 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun processFrame(image: Image) {
-        if (!isEdgeDetectionEnabled) return
-        
+        // Always enqueue original frame for renderer; processing only if enabled
         val currentTime = System.currentTimeMillis()
         frameCount.incrementAndGet()
-        
-        // FPS limiting - skip frame if too soon
         if (currentTime - lastProcessTime < minFrameInterval) {
             return
         }
-        
         try {
-            // Extract Y plane (grayscale) from YUV_420_888
             val planes = image.planes
             val yPlane = planes[0]
             val yBuffer = yPlane.buffer
             val ySize = yBuffer.remaining()
             val yArray = ByteArray(ySize)
             yBuffer.get(yArray)
-            
-            // Create frame data
             val frameData = FrameData(
                 yArray,
                 image.width,
@@ -282,30 +255,10 @@ class MainActivity : AppCompatActivity() {
                 yPlane.pixelStride,
                 currentTime
             )
-            
-            // Add to queue (non-blocking, drops frame if queue is full)
             if (!frameQueue.offer(frameData)) {
                 android.util.Log.d("MainActivity", "Frame queue full, dropping frame")
             }
-            
             lastProcessTime = currentTime
-            
-            // Log performance metrics every 2 seconds
-            if (currentTime - lastFpsTime >= 2000) {
-                val totalFrames = frameCount.get()
-                val processedFrames = processedFrameCount.get()
-                val inputFps = totalFrames * 1000.0 / (currentTime - lastFpsTime + 2000)
-                val processingFps = processedFrames * 1000.0 / (currentTime - lastFpsTime + 2000)
-                
-                android.util.Log.i("MainActivity", 
-                    "Performance - Input FPS: %.1f, Processing FPS: %.1f, Queue size: %d"
-                    .format(inputFps, processingFps, frameQueue.size))
-                
-                frameCount.set(0)
-                processedFrameCount.set(0)
-                lastFpsTime = currentTime
-            }
-            
         } catch (e: Exception) {
             android.util.Log.e("MainActivity", "Error processing frame: ${e.message}")
         }
@@ -313,16 +266,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun createCameraPreview() {
         try {
-            val texture = textureView.surfaceTexture
-            texture?.setDefaultBufferSize(1920, 1080)
-            val surface = Surface(texture)
             val imageReaderSurface = imageReader?.surface
-
             val captureRequestBuilder = cameraDevice?.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
-            captureRequestBuilder?.addTarget(surface)
             imageReaderSurface?.let { captureRequestBuilder?.addTarget(it) }
 
-            val surfaces = mutableListOf(surface)
+            val surfaces = mutableListOf<Surface>()
             imageReaderSurface?.let { surfaces.add(it) }
 
             cameraDevice?.createCaptureSession(
@@ -388,20 +336,14 @@ class MainActivity : AppCompatActivity() {
     private val frameProcessingRunnable = object : Runnable {
         override fun run() {
             try {
-                // Take frame from queue (blocking)
                 val frameData = frameQueue.take()
-                
-                // Send original frame data to renderer
                 edgeRenderer.updateOriginalFrame(
                     frameData.data,
                     frameData.width,
                     frameData.height,
                     frameData.rowStride
                 )
-                
-                // Process the frame and get result
                 if (isEdgeDetectionEnabled) {
-                    android.util.Log.d("MainActivity", "Processing frame with edge detection")
                     try {
                         val nativeResult = processFrameAndReturn(
                             frameData.data,
@@ -411,42 +353,18 @@ class MainActivity : AppCompatActivity() {
                             frameData.pixelStride
                         )
                         if (nativeResult != null) {
-                            android.util.Log.v("MainActivity", "Using native edge detection")
-                            edgeRenderer.updateProcessedFrame(
-                                nativeResult,
-                                frameData.width,
-                                frameData.height
-                            )
-                        } else {
-                            android.util.Log.e("MainActivity", "Native processing returned null")
-                            // Skip updating processed frame to avoid fallback behavior
+                            edgeRenderer.updateProcessedFrame(nativeResult, frameData.width, frameData.height)
                         }
                     } catch (e: Exception) {
                         android.util.Log.e("MainActivity", "Native processing error: ${e.message}")
-                        // Skip updating processed frame on error
                     }
-                } else {
-                    android.util.Log.d("MainActivity", "Using original frame data (no edge detection)")
-                    // No processed frame update when disabled
                 }
-                
-                // Remove unconditional processed frame update; now only updated when nativeResult is valid
-                // edgeRenderer.updateProcessedFrame(
-                //     processedData,
-                //     frameData.width,
-                //     frameData.height
-                // )
-                
                 processedFrameCount.incrementAndGet()
-                
-                // Continue processing
                 processingHandler?.post(this)
-                
             } catch (e: InterruptedException) {
                 android.util.Log.d("MainActivity", "Processing thread interrupted")
             } catch (e: Exception) {
                 android.util.Log.e("MainActivity", "Error in processing thread: ${e.message}")
-                // Continue processing even after error
                 processingHandler?.post(this)
             }
         }

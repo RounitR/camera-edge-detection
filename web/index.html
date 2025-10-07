@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Edge Detection Web Viewer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Edge Detection Web Viewer</h1>
+  </header>
+
+  <main>
+    <section class="viewer">
+      <div id="preview" class="preview">
+        <div class="placeholder">No stream connected</div>
+      </div>
+    </section>
+
+    <section class="controls">
+      <div class="control">
+        <label for="lowThreshold">Low Threshold: <span id="lowValue">30</span></label>
+        <input id="lowThreshold" type="range" min="0" max="255" value="30">
+      </div>
+      <div class="control">
+        <label for="highThreshold">High Threshold: <span id="highValue">80</span></label>
+        <input id="highThreshold" type="range" min="0" max="255" value="80">
+      </div>
+      <button id="toggleEdges" class="primary">Disable Edge Detection</button>
+    </section>
+
+    <section class="status">
+      <div id="statusText">Status: Backend not connected</div>
+    </section>
+  </main>
+
+  <script src="main.js"></script>
+</body>
+</html>

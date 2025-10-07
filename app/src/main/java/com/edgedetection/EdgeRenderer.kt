@@ -70,6 +70,11 @@ class EdgeRenderer : GLSurfaceView.Renderer {
     private val mvpMatrix = FloatArray(16)
     private val projectionMatrix = FloatArray(16)
     private val viewMatrix = FloatArray(16)
+    // Add model and aspect matrices
+    private val modelMatrix = FloatArray(16)
+    private val baseMvpMatrix = FloatArray(16)
+    private val aspectScaleMatrix = FloatArray(16)
+    private var rotationDegrees: Int = 0
 
     // Surface and frame metadata
     private var surfaceWidth: Int = 0
@@ -102,6 +107,9 @@ class EdgeRenderer : GLSurfaceView.Renderer {
         vertexBuffer = bb.asFloatBuffer()
         vertexBuffer.put(QUAD_VERTICES)
         vertexBuffer.position(0)
+        // Initialize matrices
+        Matrix.setIdentityM(modelMatrix, 0)
+        Matrix.setIdentityM(aspectScaleMatrix, 0)
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
@@ -149,15 +157,18 @@ class EdgeRenderer : GLSurfaceView.Renderer {
 
         GLES20.glViewport(0, 0, width, height)
 
-        // Calculate projection matrix
+        // Calculate projection matrix (simple frustum)
         val ratio: Float = width.toFloat() / height.toFloat()
         Matrix.frustumM(projectionMatrix, 0, -ratio, ratio, -1f, 1f, 3f, 7f)
 
         // Set the camera position (View matrix)
         Matrix.setLookAtM(viewMatrix, 0, 0f, 0f, 3f, 0f, 0f, 0f, 0f, 1.0f, 0.0f)
 
-        // Calculate the projection and view transformation
-        Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, viewMatrix, 0)
+        // Base MVP = Projection * View
+        Matrix.multiplyMM(baseMvpMatrix, 0, projectionMatrix, 0, viewMatrix, 0)
+
+        // Recompute aspect scaling when surface changes
+        updateAspectScale()
     }
 
     override fun onDrawFrame(gl: GL10?) {
@@ -379,6 +390,22 @@ class EdgeRenderer : GLSurfaceView.Renderer {
             vertexArraysEnabled = true
         }
 
+        // Build model matrix with rotation and aspect scale
+        Matrix.setIdentityM(modelMatrix, 0)
+        // Apply aspect ratio scaling
+        Matrix.multiplyMM(modelMatrix, 0, aspectScaleMatrix, 0, modelMatrix, 0)
+        // Apply rotation around Z
+        if (rotationDegrees % 360 != 0) {
+            val rot = FloatArray(16)
+            Matrix.setRotateM(rot, 0, rotationDegrees.toFloat(), 0f, 0f, 1f)
+            val tmp = FloatArray(16)
+            Matrix.multiplyMM(tmp, 0, rot, 0, modelMatrix, 0)
+            System.arraycopy(tmp, 0, modelMatrix, 0, 16)
+        }
+
+        // Final MVP = BaseMvp * Model
+        Matrix.multiplyMM(mvpMatrix, 0, baseMvpMatrix, 0, modelMatrix, 0)
+
         // Set uniforms
         GLES20.glUniformMatrix4fv(mvpMatrixHandle, 1, false, mvpMatrix, 0)
         checkGLError("Set MVP matrix uniform")
@@ -411,6 +438,8 @@ class EdgeRenderer : GLSurfaceView.Renderer {
             frameHeight = height
             originalRowStride = rowStride
             isOriginalFrameReady = true
+            // Update aspect scale based on new frame size
+            updateAspectScale()
         }
         // Ensure requestRender runs on UI thread to avoid threading violations
         glSurfaceView?.post { glSurfaceView?.requestRender() }
@@ -423,6 +452,8 @@ class EdgeRenderer : GLSurfaceView.Renderer {
             frameWidth = width
             frameHeight = height
             isProcessedFrameReady = true
+            // Update aspect scale based on new frame size
+            updateAspectScale()
         }
         // Ensure requestRender runs on UI thread to avoid threading violations
         glSurfaceView?.post { glSurfaceView?.requestRender() }
@@ -431,6 +462,47 @@ class EdgeRenderer : GLSurfaceView.Renderer {
     fun setShowProcessedFrame(show: Boolean) {
         Log.d(TAG, "setShowProcessedFrame: $show")
         showProcessedFrame = show
+        // Request render to reflect changes
+        glSurfaceView?.post { glSurfaceView?.requestRender() }
+    }
+
+    fun setRotationDegrees(degrees: Int) {
+        Log.d(TAG, "setRotationDegrees: $degrees")
+        rotationDegrees = ((degrees % 360) + 360) % 360
+        glSurfaceView?.post { glSurfaceView?.requestRender() }
+    }
+
+    private fun updateAspectScale() {
+        if (surfaceWidth == 0 || surfaceHeight == 0 || frameWidth == 0 || frameHeight == 0) {
+            // Not enough info yet
+            return
+        }
+        val surfaceAspect = surfaceWidth.toFloat() / surfaceHeight.toFloat()
+        val frameAspect = frameWidth.toFloat() / frameHeight.toFloat()
+    
+        var scaleX = 1.0f
+        var scaleY = 1.0f
+    
+        // Auto set rotation based on orientation mismatch (landscape vs portrait)
+        val surfaceLandscape = surfaceWidth >= surfaceHeight
+        val frameLandscape = frameWidth >= frameHeight
+        val desiredRotation = if (surfaceLandscape.xor(frameLandscape)) 90 else 0
+        if (rotationDegrees != desiredRotation) {
+            rotationDegrees = desiredRotation
+        }
+    
+        if (surfaceAspect > frameAspect) {
+            // Surface is wider; pillarbox horizontally
+            scaleX = frameAspect / surfaceAspect
+            scaleY = 1.0f
+        } else {
+            // Surface is taller; letterbox vertically
+            scaleX = 1.0f
+            scaleY = surfaceAspect / frameAspect
+        }
+    
+        Matrix.setIdentityM(aspectScaleMatrix, 0)
+        Matrix.scaleM(aspectScaleMatrix, 0, scaleX, scaleY, 1f)
     }
 
     fun setGLSurfaceView(surfaceView: GLSurfaceView) {
