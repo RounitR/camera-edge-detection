@@ -17,11 +17,24 @@ static cv::Mat blurBuffer;
 
 bool EdgeProcessor::initialize() {
     try {
+        LOGI("Initializing EdgeProcessor...");
+        
+        // Test basic OpenCV functionality
+        cv::Mat testMat = cv::Mat::zeros(10, 10, CV_8UC1);
+        if (testMat.empty()) {
+            LOGE("Failed to create test OpenCV Mat");
+            return false;
+        }
+        
         LOGI("OpenCV version: %s", cv::getVersionString().c_str());
+        LOGI("EdgeProcessor initialized successfully");
         isInitialized = true;
         return true;
     } catch (const std::exception& e) {
-        LOGE("Failed to initialize OpenCV: %s", e.what());
+        LOGE("Failed to initialize EdgeProcessor: %s", e.what());
+        return false;
+    } catch (...) {
+        LOGE("Failed to initialize EdgeProcessor: Unknown error");
         return false;
     }
 }

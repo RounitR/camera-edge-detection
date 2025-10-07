@@ -9,7 +9,7 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_edgedetection_MainActivity_stringFromJNI(
+Java_com_edgedetection_MainActivity_00024Companion_stringFromJNI(
         JNIEnv* env,
         jobject /* this */) {
     std::string hello = "Hello from C++";
@@ -17,42 +17,15 @@ Java_com_edgedetection_MainActivity_stringFromJNI(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_edgedetection_EdgeProcessor_initializeOpenCV(
+Java_com_edgedetection_MainActivity_00024Companion_initializeOpenCV(
         JNIEnv* env,
         jobject /* this */) {
-    LOGI("Initializing OpenCV");
     return EdgeProcessor::initialize();
 }
 
-extern "C" JNIEXPORT jobject JNICALL
-Java_com_edgedetection_EdgeProcessor_processFrame(
-        JNIEnv* env,
-        jobject /* this */,
-        jobject bitmap) {
-    
-    AndroidBitmapInfo info;
-    void* pixels;
-    
-    if (AndroidBitmap_getInfo(env, bitmap, &info) < 0) {
-        LOGE("Failed to get bitmap info");
-        return nullptr;
-    }
-    
-    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) < 0) {
-        LOGE("Failed to lock bitmap pixels");
-        return nullptr;
-    }
-    
-    // Create a copy of the bitmap for processing
-    jobject resultBitmap = EdgeProcessor::processFrameAndReturn(env, pixels, info.width, info.height, info.format);
-    
-    AndroidBitmap_unlockPixels(env, bitmap);
-    
-    return resultBitmap ? resultBitmap : bitmap;
-}
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_edgedetection_MainActivity_processFrameNative(
+Java_com_edgedetection_MainActivity_00024Companion_processFrameNative(
         JNIEnv* env,
         jobject /* this */,
         jbyteArray frameData,
@@ -87,7 +60,7 @@ Java_com_edgedetection_MainActivity_processFrameNative(
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL
-Java_com_edgedetection_MainActivity_processFrameAndReturn(
+Java_com_edgedetection_MainActivity_00024Companion_processFrameAndReturn(
         JNIEnv* env,
         jobject /* this */,
         jbyteArray frameData,
@@ -125,10 +98,14 @@ Java_com_edgedetection_MainActivity_processFrameAndReturn(
     jbyteArray result = env->NewByteArray(resultSize);
     if (!result) {
         LOGE("Failed to create result byte array");
+        delete[] processedData;
         return nullptr;
     }
     
     env->SetByteArrayRegion(result, 0, resultSize, reinterpret_cast<jbyte*>(processedData));
+    
+    // Free native processed buffer to avoid memory leak
+    delete[] processedData;
     
     return result;
 }

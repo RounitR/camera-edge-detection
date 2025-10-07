@@ -20,6 +20,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import org.opencv.android.OpenCVLoader
 import java.nio.ByteBuffer
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.LinkedBlockingQueue
@@ -30,9 +31,34 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val CAMERA_PERMISSION_REQUEST_CODE = 200
+        private var isNativeLibraryLoaded = false
         
-        init {
-            System.loadLibrary("edgedetection")
+        // Native methods for frame processing
+        external fun stringFromJNI(): String
+        external fun processFrameNative(frameData: ByteArray, width: Int, height: Int, rowStride: Int, pixelStride: Int)
+        external fun processFrameAndReturn(frameData: ByteArray, width: Int, height: Int, rowStride: Int, pixelStride: Int): ByteArray?
+        external fun initializeOpenCV(): Boolean
+        
+        fun loadNativeLibrary(): Boolean {
+            if (!isNativeLibraryLoaded) {
+                try {
+                    // Explicitly load C++ runtime and OpenCV before our native library to avoid dlopen symbol issues
+                    System.loadLibrary("c++_shared")
+                    android.util.Log.d("MainActivity", "libc++_shared loaded successfully")
+                    System.loadLibrary("opencv_java4")
+                    android.util.Log.d("MainActivity", "libopencv_java4 loaded successfully")
+                    System.loadLibrary("edgedetection")
+                    android.util.Log.d("MainActivity", "Native library loaded successfully")
+                    isNativeLibraryLoaded = true
+                } catch (e: UnsatisfiedLinkError) {
+                    android.util.Log.e("MainActivity", "Failed to load native libraries: ${e.message}")
+                    return false
+                } catch (e: Exception) {
+                    android.util.Log.e("MainActivity", "Unexpected error loading native libraries: ${e.message}")
+                    return false
+                }
+            }
+            return true
         }
     }
 
@@ -73,6 +99,10 @@ class MainActivity : AppCompatActivity() {
         val pixelStride: Int,
         val timestamp: Long
     )
+    
+    // OpenCV Manager callback
+    // OpenCV is initialized via OpenCVLoader.initDebug() in onResume()
+    // Native library is loaded via loadNativeLibrary()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -87,30 +117,32 @@ class MainActivity : AppCompatActivity() {
         glSurfaceView.setEGLContextClientVersion(2)
         glSurfaceView.setRenderer(edgeRenderer)
         glSurfaceView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
+        
+        // Set GLSurfaceView reference in renderer for requestRender() calls
+        edgeRenderer.setGLSurfaceView(glSurfaceView)
 
         toggleButton.setOnClickListener {
             isEdgeDetectionEnabled = !isEdgeDetectionEnabled
             toggleButton.text = if (isEdgeDetectionEnabled) "Disable Edge Detection" else "Enable Edge Detection"
             
+            android.util.Log.d("MainActivity", "Edge detection toggled: $isEdgeDetectionEnabled")
+            
             // Switch between TextureView and GLSurfaceView
             if (isEdgeDetectionEnabled) {
+                android.util.Log.d("MainActivity", "Switching to GLSurfaceView for edge detection")
                 textureView.visibility = View.GONE
                 glSurfaceView.visibility = View.VISIBLE
                 edgeRenderer.setShowProcessedFrame(true)
             } else {
+                android.util.Log.d("MainActivity", "Switching to TextureView for normal camera")
                 glSurfaceView.visibility = View.GONE
                 textureView.visibility = View.VISIBLE
                 edgeRenderer.setShowProcessedFrame(false)
             }
         }
 
-        // Initialize OpenCV
-        val openCvInitialized = EdgeProcessor.initializeOpenCV()
-        
-        // Test JNI connectivity
-        val jniTest = stringFromJNI()
-        android.util.Log.i("MainActivity", "JNI Test: $jniTest")
-        android.util.Log.i("MainActivity", "OpenCV Initialized: $openCvInitialized")
+        // Removed early EdgeProcessor initialization to ensure native libraries are loaded first
+        // android.util.Log.i("MainActivity", "Deferring EdgeProcessor initialization to onResume after native libraries and OpenCV are loaded")
         
         // Setup ImageReader for frame capture
         setupImageReader()
@@ -122,6 +154,31 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         startBackgroundThread()
+        
+        // Load native dependencies first to ensure proper symbol resolution
+        loadNativeLibrary()
+        
+        // Initialize OpenCV using initDebug (will succeed if opencv_java4 already loaded)
+        if (OpenCVLoader.initDebug()) {
+            android.util.Log.d("MainActivity", "OpenCV loaded via initDebug")
+        } else {
+            android.util.Log.e("MainActivity", "Failed to load OpenCV via initDebug")
+        }
+        
+        // Initialize native OpenCV and EdgeProcessor (no fallback)
+        val edgeProcessorInitialized = try {
+            initializeOpenCV()
+        } catch (e: UnsatisfiedLinkError) {
+            android.util.Log.e("MainActivity", "UnsatisfiedLinkError during initializeOpenCV: ${e.message}")
+            false
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Error during initializeOpenCV: ${e.message}")
+            false
+        }
+        android.util.Log.i("MainActivity", "EdgeProcessor Initialized (onResume): $edgeProcessorInitialized")
+        if (!edgeProcessorInitialized) {
+            Toast.makeText(this, "Failed to initialize edge detection.", Toast.LENGTH_LONG).show()
+        }
         
         if (textureView.isAvailable) {
             openCamera()
@@ -338,26 +395,47 @@ class MainActivity : AppCompatActivity() {
                 edgeRenderer.updateOriginalFrame(
                     frameData.data,
                     frameData.width,
-                    frameData.height
+                    frameData.height,
+                    frameData.rowStride
                 )
                 
                 // Process the frame and get result
-                val processedData = processFrameAndReturn(
-                    frameData.data,
-                    frameData.width,
-                    frameData.height,
-                    frameData.rowStride,
-                    frameData.pixelStride
-                )
-                
-                // Send processed frame data to renderer
-                processedData?.let {
-                    edgeRenderer.updateProcessedFrame(
-                        it,
-                        frameData.width,
-                        frameData.height
-                    )
+                if (isEdgeDetectionEnabled) {
+                    android.util.Log.d("MainActivity", "Processing frame with edge detection")
+                    try {
+                        val nativeResult = processFrameAndReturn(
+                            frameData.data,
+                            frameData.width,
+                            frameData.height,
+                            frameData.rowStride,
+                            frameData.pixelStride
+                        )
+                        if (nativeResult != null) {
+                            android.util.Log.v("MainActivity", "Using native edge detection")
+                            edgeRenderer.updateProcessedFrame(
+                                nativeResult,
+                                frameData.width,
+                                frameData.height
+                            )
+                        } else {
+                            android.util.Log.e("MainActivity", "Native processing returned null")
+                            // Skip updating processed frame to avoid fallback behavior
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("MainActivity", "Native processing error: ${e.message}")
+                        // Skip updating processed frame on error
+                    }
+                } else {
+                    android.util.Log.d("MainActivity", "Using original frame data (no edge detection)")
+                    // No processed frame update when disabled
                 }
+                
+                // Remove unconditional processed frame update; now only updated when nativeResult is valid
+                // edgeRenderer.updateProcessedFrame(
+                //     processedData,
+                //     frameData.width,
+                //     frameData.height
+                // )
                 
                 processedFrameCount.incrementAndGet()
                 
@@ -407,24 +485,4 @@ class MainActivity : AppCompatActivity() {
      * A native method that is implemented by the 'edgedetection' native library,
      * which is packaged with this app.
      */
-    external fun stringFromJNI(): String
-    
-    /**
-     * Native method to process frame data
-     */
-    external fun processFrameNative(
-        frameData: ByteArray,
-        width: Int,
-        height: Int,
-        rowStride: Int,
-        pixelStride: Int
-    )
-    
-    external fun processFrameAndReturn(
-        frameData: ByteArray,
-        width: Int,
-        height: Int,
-        rowStride: Int,
-        pixelStride: Int
-    ): ByteArray?
 }

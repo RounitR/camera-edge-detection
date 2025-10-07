@@ -6,14 +6,11 @@ project("edgedetection")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Set OpenCV directory
-set(OpenCV_DIR ${OPENCV_ANDROID_HOME}/native/jni)
+# Use libc++
+set(ANDROID_STL "c++_shared")
 
-# Find OpenCV
-find_package(OpenCV REQUIRED java)
-
-# Include directories
-include_directories(${OpenCV_INCLUDE_DIRS})
+# Use OpenCV SDK's CMake config
+find_package(OpenCV 4.12 REQUIRED java)
 
 # Add native library
 add_library(
@@ -23,13 +20,19 @@ add_library(
     edge_processor.cpp
 )
 
-# Link libraries
+# Link libraries using OpenCV SDK
 target_link_libraries(
     edgedetection
-    ${OpenCV_LIBS}
+    ${OpenCV_LIBRARIES}
+    c++_shared
     log
     android
     jnigraphics
+)
+
+# Ensure C++ shared library is used
+set_target_properties(edgedetection PROPERTIES
+    ANDROID_STL c++_shared
 )
 
 # Compiler-specific options

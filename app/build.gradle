@@ -5,6 +5,8 @@ android {
     namespace 'com.edgedetection'
     compileSdk 34
 
+    ndkVersion '29.0.14033849'
+
     defaultConfig {
         applicationId "com.edgedetection"
         minSdk 24
@@ -20,17 +22,24 @@ android {
         
         externalNativeBuild {
             cmake {
-                cppFlags "-std=c++17"
-                arguments "-DANDROID_STL=c++_shared",
-                          "-DOPENCV_ANDROID_HOME=" + System.getenv('OPENCV_ANDROID_HOME')
+                cppFlags '-std=c++17'
+                arguments '-DANDROID_STL=c++_shared', "-DOpenCV_DIR=${project(':opencv').projectDir}/native/jni"
             }
         }
     }
 
     buildTypes {
+        debug {
+            packagingOptions {
+                doNotStrip '**/*.so'
+            }
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            packagingOptions {
+                doNotStrip '**/*.so'
+            }
         }
     }
     
@@ -41,6 +50,11 @@ android {
     kotlinOptions {
         jvmTarget = '1.8'
     }
+
+    // Remove prefab consumption since we use OpenCV CMake config now
+    // buildFeatures {
+    //     prefab true
+    // }
     
     externalNativeBuild {
         cmake {
