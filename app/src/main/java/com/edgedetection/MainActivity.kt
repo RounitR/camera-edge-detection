@@ -17,7 +17,10 @@ import android.view.Surface
 import android.view.View
 import android.widget.Button
 import android.widget.SeekBar
+import android.widget.TextView
 import android.widget.Toast
+import android.graphics.Bitmap
+import java.io.ByteArrayOutputStream
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -76,6 +79,8 @@ class MainActivity : AppCompatActivity() {
     private var activeCameraId: String? = null
     private lateinit var fpsTextView: TextView
     private var uiHandler: Handler? = null
+    // HTTP frame server
+    private var frameServer: FrameServer? = null
     
     // Frame capture components
     private var imageReader: ImageReader? = null
@@ -182,6 +187,8 @@ class MainActivity : AppCompatActivity() {
         // Start FPS overlay updates
         uiHandler = Handler(mainLooper)
         uiHandler?.post(fpsUpdateRunnable)
+        // Start HTTP frame server
+        startFrameServer()
     }
 
     override fun onPause() {
@@ -189,6 +196,8 @@ class MainActivity : AppCompatActivity() {
         closeCamera()
         stopBackgroundThread()
         stopProcessingThread()
+        // Stop HTTP frame server
+        stopFrameServer()
         super.onPause()
     }
 
@@ -413,9 +422,14 @@ class MainActivity : AppCompatActivity() {
                         )
                         if (nativeResult != null) {
                             edgeRenderer.updateProcessedFrame(nativeResult, frameData.width, frameData.height)
+                            // Publish JPEG to HTTP server
+                            val jpeg = grayscaleToJpeg(nativeResult, frameData.width, frameData.height)
+                            frameServer?.updateFrameJpeg(jpeg)
+                            frameServer?.updateStatus("running")
                         }
                     } catch (e: Exception) {
                         android.util.Log.e("MainActivity", "Native processing error: ${e.message}")
+                        frameServer?.updateStatus("error: ${e.message}")
                     }
                 }
                 // Throttle re-posting to approximate target processed FPS under load
@@ -493,4 +507,68 @@ class MainActivity : AppCompatActivity() {
             android.util.Log.e("MainActivity", "setCannyThresholds error: ${t.message}")
         }
     }
+
+    private fun grayscaleToJpeg(gray: ByteArray, width: Int, height: Int, quality: Int = 70): ByteArray? {
+    return try {
+        val rgbaSize = width * height * 4
+        val rgba = ByteArray(rgbaSize)
+        var dst = 0
+        for (i in gray.indices) {
+            val g = gray[i].toInt() and 0xFF
+            val b = g.toByte()
+            rgba[dst] = b
+            rgba[dst + 1] = b
+            rgba[dst + 2] = b
+            rgba[dst + 3] = 0xFF.toByte()
+            dst += 4
+        }
+        val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val buffer = java.nio.ByteBuffer.wrap(rgba)
+        bmp.copyPixelsFromBuffer(buffer)
+        val baos = ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.JPEG, quality, baos)
+        bmp.recycle()
+        baos.toByteArray()
+    } catch (t: Throwable) {
+        android.util.Log.e("MainActivity", "grayscaleToJpeg error: ${t.message}")
+        null
+    }
+}
+
+private fun startFrameServer() {
+    try {
+        if (frameServer == null) {
+            frameServer = FrameServer(8081)
+            frameServer?.onSettings = { low, high, enabled ->
+                runOnUiThread {
+                    try {
+                        isEdgeDetectionEnabled = enabled
+                        edgeRenderer.setShowProcessedFrame(enabled)
+                        safeSetCannyThresholds(low.toDouble(), high.toDouble())
+                        // Update UI labels and toggle button text
+                        findViewById<android.widget.TextView>(R.id.lowThresholdLabel).text = "Low Threshold: $low"
+                        findViewById<android.widget.TextView>(R.id.highThresholdLabel).text = "High Threshold: $high"
+                        toggleButton.text = if (enabled) "Disable Edge Detection" else "Enable Edge Detection"
+                    } catch (e: Exception) {
+                        android.util.Log.e("MainActivity", "apply settings error: ${e.message}")
+                    }
+                }
+            }
+            frameServer?.start()
+            android.util.Log.i("MainActivity", "FrameServer started on port 8081")
+        }
+    } catch (t: Throwable) {
+        android.util.Log.e("MainActivity", "startFrameServer error: ${t.message}")
+    }
+}
+
+private fun stopFrameServer() {
+    try {
+        frameServer?.stop()
+        frameServer = null
+        android.util.Log.i("MainActivity", "FrameServer stopped")
+    } catch (t: Throwable) {
+        android.util.Log.e("MainActivity", "stopFrameServer error: ${t.message}")
+    }
+}
 }
