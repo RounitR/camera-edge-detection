@@ -1,0 +1,13 @@
+{
+  "name": "edge-detection-web-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "start": "npx http-server ./ -p 5173 -c-1"
+  },
+  "devDependencies": {
+    "typescript": "5.4.5",
+    "http-server": "14.1.1"
+  }
+}
