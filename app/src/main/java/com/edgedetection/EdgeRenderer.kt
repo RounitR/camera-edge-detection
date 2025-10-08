@@ -38,11 +38,11 @@ class EdgeRenderer : GLSurfaceView.Renderer {
             }
         """
         private val QUAD_VERTICES = floatArrayOf(
-            // x, y, z,      u, v
-            -1.0f, -1.0f, 0.0f,      0.0f, 1.0f,  // Bottom left
-             1.0f, -1.0f, 0.0f,      1.0f, 1.0f,  // Bottom right
-            -1.0f,  1.0f, 0.0f,      0.0f, 0.0f,  // Top left
-             1.0f,  1.0f, 0.0f,      1.0f, 0.0f   // Top right
+            // x,    y,    z,      u,   v
+            -1.0f, -1.0f, 0.0f,      0.0f, 0.0f,  // Bottom left
+             1.0f, -1.0f, 0.0f,      1.0f, 0.0f,  // Bottom right
+            -1.0f,  1.0f, 0.0f,      0.0f, 1.0f,  // Top left
+             1.0f,  1.0f, 0.0f,      1.0f, 1.0f   // Top right
         )
         private const val COORDS_PER_VERTEX = 3
         private const val TEXTURE_COORDS_PER_VERTEX = 2
@@ -65,6 +65,19 @@ class EdgeRenderer : GLSurfaceView.Renderer {
     private var processedTextureIds = IntArray(2)
     private var currentCameraBuffer = 0
     private var currentProcessedBuffer = 0
+    private var hasCameraTexture = false
+    private var hasProcessedTexture = false
+    private var cameraAllocatedWidth = IntArray(2)
+    private var cameraAllocatedHeight = IntArray(2)
+    private var processedAllocatedWidth = IntArray(2)
+    private var processedAllocatedHeight = IntArray(2)
+    private var scaleModeFill = true // center-crop: fill screen
+
+    // Reusable buffers to reduce allocations per frame
+    private var cameraRgbaBuffer: ByteArray? = null
+    private var processedRgbaBuffer: ByteArray? = null
+    private var cameraUploadByteBuffer: ByteBuffer? = null
+    private var processedUploadByteBuffer: ByteBuffer? = null
 
     // Matrices
     private val mvpMatrix = FloatArray(16)
@@ -75,11 +88,17 @@ class EdgeRenderer : GLSurfaceView.Renderer {
     private val baseMvpMatrix = FloatArray(16)
     private val aspectScaleMatrix = FloatArray(16)
     private var rotationDegrees: Int = 0
+    private var mirrorX: Boolean = false
+    // Add vertical mirror support
+    private var mirrorY: Boolean = false
 
     // Surface and frame metadata
     private var surfaceWidth: Int = 0
     private var surfaceHeight: Int = 0
     private var showProcessedFrame: Boolean = false
+    // Simple toggle without complex crossfade
+    private var requireFreshProcessedAfterToggle: Boolean = false
+    private var freshProcessedAvailable: Boolean = false
 
     // Pending frame data (original and processed)
     private var pendingOriginalFrameData: ByteArray? = null
@@ -157,33 +176,21 @@ class EdgeRenderer : GLSurfaceView.Renderer {
 
         GLES20.glViewport(0, 0, width, height)
 
-        // Calculate projection matrix (simple frustum)
-        val ratio: Float = width.toFloat() / height.toFloat()
-        Matrix.frustumM(projectionMatrix, 0, -ratio, ratio, -1f, 1f, 3f, 7f)
-
-        // Set the camera position (View matrix)
-        Matrix.setLookAtM(viewMatrix, 0, 0f, 0f, 3f, 0f, 0f, 0f, 0f, 1.0f, 0.0f)
-
-        // Base MVP = Projection * View
-        Matrix.multiplyMM(baseMvpMatrix, 0, projectionMatrix, 0, viewMatrix, 0)
-
+        // Simplify to identity matrices for 2D quad rendering
+        Matrix.setIdentityM(projectionMatrix, 0)
+        Matrix.setIdentityM(viewMatrix, 0)
+    
+        // Base MVP = Identity
+        Matrix.setIdentityM(baseMvpMatrix, 0)
+    
         // Recompute aspect scaling when surface changes
         updateAspectScale()
     }
 
     override fun onDrawFrame(gl: GL10?) {
-        Log.d(TAG, "onDrawFrame called")
-
-        // Frame synchronization
-        val currentTime = System.currentTimeMillis()
-        if (currentTime - lastFrameTime < targetFrameTime) {
-            Log.d(TAG, "Frame skipped due to rate limiting (${currentTime - lastFrameTime}ms < ${targetFrameTime}ms)")
-            return // Skip frame to maintain target FPS
-        }
-        lastFrameTime = currentTime
+        // Log removed to reduce jank/flicker
+        lastFrameTime = System.currentTimeMillis()
         frameCounter++
-
-        Log.d(TAG, "Processing frame $frameCounter")
 
         // Clear the screen
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
@@ -197,24 +204,46 @@ class EdgeRenderer : GLSurfaceView.Renderer {
         // Update texture if new frame data is available
         updateTexture()
 
-        // Determine which texture to use
-        val targetTexture = if (showProcessedFrame) {
-            Log.d(TAG, "Rendering processed frame, buffer: $currentProcessedBuffer, texture: ${processedTextureIds[currentProcessedBuffer]}")
+        // Determine which texture to use (simple logic without crossfade)
+        val useProcessed = showProcessedFrame && hasProcessedTexture
+        val targetTexture = if (useProcessed) {
             processedTextureIds[currentProcessedBuffer]
         } else {
-            Log.d(TAG, "Rendering camera frame, buffer: $currentCameraBuffer, texture: ${cameraTextureIds[currentCameraBuffer]}")
             cameraTextureIds[currentCameraBuffer]
         }
-
-        // Bind texture only if different from last bound
-        if (lastBoundTexture != targetTexture) {
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, targetTexture)
-            lastBoundTexture = targetTexture
+        // Debug: periodically log selection state to diagnose flicker
+        if (frameCounter % 120L == 0L) {
+            Log.d(TAG, "onDrawFrame: useProcessed=" + useProcessed +
+                    ", showProcessedFrame=" + showProcessedFrame +
+                    ", hasProcessedTexture=" + hasProcessedTexture +
+                    ", requireFresh=" + requireFreshProcessedAfterToggle +
+                    ", freshAvailable=" + freshProcessedAvailable +
+                    ", hasCameraTexture=" + hasCameraTexture +
+                    ", currentProcessedBuffer=" + currentProcessedBuffer +
+                    ", currentCameraBuffer=" + currentCameraBuffer)
         }
 
-        // Draw the quad
-        drawQuad()
+        // Only render if we have a valid texture corresponding to the selected type
+        val canRender = if (useProcessed) hasProcessedTexture else hasCameraTexture
+        if (targetTexture > 0 && canRender) {
+            // Bind texture only if different from last bound
+            if (lastBoundTexture != targetTexture) {
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, targetTexture)
+                lastBoundTexture = targetTexture
+            }
+
+            // Set alpha to full opacity
+            GLES20.glUniform1f(alphaHandle, 1.0f)
+
+            // Draw the quad
+            drawQuad()
+        }
+
+        // Clear the fresh requirement once processed is visible
+        if (useProcessed && freshProcessedAvailable && requireFreshProcessedAfterToggle) {
+            requireFreshProcessedAfterToggle = false
+        }
 
         // Check for OpenGL errors (less frequently for performance)
         if (frameCounter % 60 == 0L) {
@@ -274,96 +303,135 @@ class EdgeRenderer : GLSurfaceView.Renderer {
 
     private fun updateTexture() {
         synchronized(this) {
+            var updated = false
             // Update original frame texture using double-buffering
-            if (isOriginalFrameReady && pendingOriginalFrameData != null && frameWidth > 0 && frameHeight > 0) {
-                // Switch to next buffer for upload
+            // Skip uploading original frames when processed view is active to reduce CPU/GPU load
+            if (!showProcessedFrame && isOriginalFrameReady && pendingOriginalFrameData != null && frameWidth > 0 && frameHeight > 0) {
                 val uploadBuffer = (currentCameraBuffer + 1) % 2
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, cameraTextureIds[uploadBuffer])
 
-                // Convert grayscale data (Y plane, possibly strided) to RGBA for OpenGL
-                val rgbaData = if (originalRowStride != 0 && originalRowStride != frameWidth) {
-                    Log.d(TAG, "Converting original frame with stride: rowStride=$originalRowStride width=$frameWidth height=$frameHeight")
-                    convertGrayscaleWithStrideToRGBA(pendingOriginalFrameData!!, frameWidth, frameHeight, originalRowStride)
-                } else {
-                    convertGrayscaleToRGBA(pendingOriginalFrameData!!)
+                val rgbaSize = frameWidth * frameHeight * 4
+                if (cameraRgbaBuffer == null || cameraRgbaBuffer!!.size != rgbaSize) {
+                    cameraRgbaBuffer = ByteArray(rgbaSize)
+                    cameraUploadByteBuffer = ByteBuffer.allocateDirect(rgbaSize)
                 }
-                val buffer = ByteBuffer.allocateDirect(rgbaData.size)
-                buffer.put(rgbaData)
+                // Fill reusable RGBA buffer from grayscale
+                if (originalRowStride != 0 && originalRowStride != frameWidth) {
+                    convertGrayscaleWithStrideToRGBA(
+                        pendingOriginalFrameData!!,
+                        frameWidth,
+                        frameHeight,
+                        originalRowStride,
+                        cameraRgbaBuffer!!
+                    )
+                } else {
+                    convertGrayscaleToRGBA(pendingOriginalFrameData!!, cameraRgbaBuffer!!)
+                }
+                val buffer = cameraUploadByteBuffer!!
+                buffer.position(0)
+                buffer.put(cameraRgbaBuffer!!)
                 buffer.position(0)
 
-                GLES20.glTexImage2D(
-                    GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
-                    frameWidth, frameHeight, 0,
-                    GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer
-                )
+                GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
+                val needAlloc = cameraAllocatedWidth[uploadBuffer] != frameWidth || cameraAllocatedHeight[uploadBuffer] != frameHeight
+                if (needAlloc) {
+                    GLES20.glTexImage2D(
+                        GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+                        frameWidth, frameHeight, 0,
+                        GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer
+                    )
+                    cameraAllocatedWidth[uploadBuffer] = frameWidth
+                    cameraAllocatedHeight[uploadBuffer] = frameHeight
+                } else {
+                    GLES20.glTexSubImage2D(
+                        GLES20.GL_TEXTURE_2D, 0,
+                        0, 0, frameWidth, frameHeight,
+                        GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer
+                    )
+                }
 
-                // Switch to the newly uploaded buffer for rendering
                 currentCameraBuffer = uploadBuffer
                 isOriginalFrameReady = false
+                updated = true
+                hasCameraTexture = true
             }
 
             // Update processed frame texture using double-buffering
             if (isProcessedFrameReady && pendingProcessedFrameData != null && frameWidth > 0 && frameHeight > 0) {
-                Log.d(TAG, "Uploading processed frame texture: ${pendingProcessedFrameData!!.size} bytes")
-                // Switch to next buffer for upload
                 val uploadBuffer = (currentProcessedBuffer + 1) % 2
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, processedTextureIds[uploadBuffer])
 
-                // Convert grayscale data to RGBA for OpenGL (processed data is contiguous width*height)
-                val rgbaData = convertGrayscaleToRGBA(pendingProcessedFrameData!!)
-                Log.d(TAG, "Converted to RGBA: ${rgbaData.size} bytes")
-                val buffer = ByteBuffer.allocateDirect(rgbaData.size)
-                buffer.put(rgbaData)
+                val rgbaSize = frameWidth * frameHeight * 4
+                if (processedRgbaBuffer == null || processedRgbaBuffer!!.size != rgbaSize) {
+                    processedRgbaBuffer = ByteArray(rgbaSize)
+                    processedUploadByteBuffer = ByteBuffer.allocateDirect(rgbaSize)
+                }
+                convertGrayscaleToRGBA(pendingProcessedFrameData!!, processedRgbaBuffer!!)
+                val buffer = processedUploadByteBuffer!!
+                buffer.position(0)
+                buffer.put(processedRgbaBuffer!!)
                 buffer.position(0)
 
-                GLES20.glTexImage2D(
-                    GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
-                    frameWidth, frameHeight, 0,
-                    GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer
-                )
+                GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
+                val needAlloc = processedAllocatedWidth[uploadBuffer] != frameWidth || processedAllocatedHeight[uploadBuffer] != frameHeight
+                if (needAlloc) {
+                    GLES20.glTexImage2D(
+                        GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+                        frameWidth, frameHeight, 0,
+                        GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer
+                    )
+                    processedAllocatedWidth[uploadBuffer] = frameWidth
+                    processedAllocatedHeight[uploadBuffer] = frameHeight
+                } else {
+                    GLES20.glTexSubImage2D(
+                        GLES20.GL_TEXTURE_2D, 0,
+                        0, 0, frameWidth, frameHeight,
+                        GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer
+                    )
+                }
 
-                Log.d(TAG, "Texture uploaded successfully, switching to buffer $uploadBuffer")
-                // Switch to the newly uploaded buffer for rendering
                 currentProcessedBuffer = uploadBuffer
                 isProcessedFrameReady = false
+                updated = true
+                hasProcessedTexture = true
+            }
+            if (!updated) {
+                // No texture updated; avoid unnecessary state changes
             }
         }
     }
 
-    private fun convertGrayscaleToRGBA(grayscaleData: ByteArray): ByteArray {
-        val rgbaData = ByteArray(grayscaleData.size * 4)
+    private fun convertGrayscaleToRGBA(grayscaleData: ByteArray, outRgba: ByteArray) {
+        // outRgba must be size width*height*4 matching grayscaleData.size*4
+        var dstIndex = 0
         for (i in grayscaleData.indices) {
             val gray = grayscaleData[i].toInt() and 0xFF
-            val baseIndex = i * 4
-            rgbaData[baseIndex] = gray.toByte()     // R
-            rgbaData[baseIndex + 1] = gray.toByte() // G
-            rgbaData[baseIndex + 2] = gray.toByte() // B
-            rgbaData[baseIndex + 3] = 255.toByte()  // A
+            outRgba[dstIndex] = gray.toByte()     // R
+            outRgba[dstIndex + 1] = gray.toByte() // G
+            outRgba[dstIndex + 2] = gray.toByte() // B
+            outRgba[dstIndex + 3] = 255.toByte()  // A
+            dstIndex += 4
         }
-        return rgbaData
     }
 
     // Stride-aware conversion for Y plane (rowStride may be > width)
-    private fun convertGrayscaleWithStrideToRGBA(grayscaleData: ByteArray, width: Int, height: Int, rowStride: Int): ByteArray {
-        val rgbaData = ByteArray(width * height * 4)
-        var srcIndex = 0
+    private fun convertGrayscaleWithStrideToRGBA(grayscaleData: ByteArray, width: Int, height: Int, rowStride: Int, outRgba: ByteArray) {
         var dstIndex = 0
         for (row in 0 until height) {
-            srcIndex = row * rowStride
+            val srcIndex = row * rowStride
             for (col in 0 until width) {
                 val gray = grayscaleData[srcIndex + col].toInt() and 0xFF
-                rgbaData[dstIndex] = gray.toByte()     // R
-                rgbaData[dstIndex + 1] = gray.toByte() // G
-                rgbaData[dstIndex + 2] = gray.toByte() // B
-                rgbaData[dstIndex + 3] = 255.toByte()  // A
+                outRgba[dstIndex] = gray.toByte()     // R
+                outRgba[dstIndex + 1] = gray.toByte() // G
+                outRgba[dstIndex + 2] = gray.toByte() // B
+                outRgba[dstIndex + 3] = 255.toByte()  // A
                 dstIndex += 4
             }
         }
-        return rgbaData
     }
 
     private fun drawQuad() {
-        Log.d(TAG, "drawQuad: Starting to draw quad")
+        // Log.d(TAG, "drawQuad: Starting to draw quad")
 
         // Enable vertex arrays only if not already enabled
         if (!vertexArraysEnabled) {
@@ -392,16 +460,36 @@ class EdgeRenderer : GLSurfaceView.Renderer {
 
         // Build model matrix with rotation and aspect scale
         Matrix.setIdentityM(modelMatrix, 0)
-        // Apply aspect ratio scaling
-        Matrix.multiplyMM(modelMatrix, 0, aspectScaleMatrix, 0, modelMatrix, 0)
-        // Apply rotation around Z
+        // Apply rotation around Z first
         if (rotationDegrees % 360 != 0) {
             val rot = FloatArray(16)
             Matrix.setRotateM(rot, 0, rotationDegrees.toFloat(), 0f, 0f, 1f)
-            val tmp = FloatArray(16)
-            Matrix.multiplyMM(tmp, 0, rot, 0, modelMatrix, 0)
-            System.arraycopy(tmp, 0, modelMatrix, 0, 16)
+            val tmpRot = FloatArray(16)
+            Matrix.multiplyMM(tmpRot, 0, rot, 0, modelMatrix, 0)
+            System.arraycopy(tmpRot, 0, modelMatrix, 0, 16)
         }
+        // Apply mirror for front camera (selfie view)
+        if (mirrorX) {
+            val mirror = FloatArray(16)
+            Matrix.setIdentityM(mirror, 0)
+            Matrix.scaleM(mirror, 0, -1f, 1f, 1f)
+            val tmpMirror = FloatArray(16)
+            Matrix.multiplyMM(tmpMirror, 0, mirror, 0, modelMatrix, 0)
+            System.arraycopy(tmpMirror, 0, modelMatrix, 0, 16)
+        }
+        // Apply vertical mirror when needed (fixes upside-down frames)
+        if (mirrorY) {
+            val mirror = FloatArray(16)
+            Matrix.setIdentityM(mirror, 0)
+            Matrix.scaleM(mirror, 0, 1f, -1f, 1f)
+            val tmpMirrorY = FloatArray(16)
+            Matrix.multiplyMM(tmpMirrorY, 0, mirror, 0, modelMatrix, 0)
+            System.arraycopy(tmpMirrorY, 0, modelMatrix, 0, 16)
+        }
+        // Apply aspect ratio scaling last (scale X,Y to fill)
+        val tmpAspect = FloatArray(16)
+        Matrix.multiplyMM(tmpAspect, 0, aspectScaleMatrix, 0, modelMatrix, 0)
+        System.arraycopy(tmpAspect, 0, modelMatrix, 0, 16)
 
         // Final MVP = BaseMvp * Model
         Matrix.multiplyMM(mvpMatrix, 0, baseMvpMatrix, 0, modelMatrix, 0)
@@ -411,15 +499,14 @@ class EdgeRenderer : GLSurfaceView.Renderer {
         checkGLError("Set MVP matrix uniform")
         GLES20.glUniform1i(textureHandle, 0) // Use texture unit 0
         checkGLError("Set texture uniform")
-        GLES20.glUniform1f(alphaHandle, 1.0f) // Full opacity
-        checkGLError("Set alpha uniform")
+        // alpha is now set externally per draw call for crossfade
 
         // Draw the quad
-        Log.d(TAG, "drawQuad: Drawing triangle strip with 4 vertices")
+        // Log.d(TAG, "drawQuad: Drawing triangle strip with 4 vertices")
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         checkGLError("Draw arrays")
 
-        Log.d(TAG, "drawQuad: Completed drawing quad")
+        // Log.d(TAG, "drawQuad: Completed drawing quad")
     }
 
     private fun checkGLError(operation: String) {
@@ -432,7 +519,7 @@ class EdgeRenderer : GLSurfaceView.Renderer {
     // Public methods for updating frame data
     fun updateOriginalFrame(frameData: ByteArray, width: Int, height: Int, rowStride: Int) {
         synchronized(this) {
-            Log.d(TAG, "updateOriginalFrame: ${frameData.size} bytes, ${width}x${height}, rowStride=$rowStride")
+            // Log.d(TAG, "updateOriginalFrame: ${frameData.size} bytes, ${width}x${height}, rowStride=$rowStride")
             pendingOriginalFrameData = frameData
             frameWidth = width
             frameHeight = height
@@ -441,35 +528,50 @@ class EdgeRenderer : GLSurfaceView.Renderer {
             // Update aspect scale based on new frame size
             updateAspectScale()
         }
-        // Ensure requestRender runs on UI thread to avoid threading violations
-        glSurfaceView?.post { glSurfaceView?.requestRender() }
+        // Removed requestRender post; surface renders continuously
     }
 
     fun updateProcessedFrame(frameData: ByteArray, width: Int, height: Int) {
         synchronized(this) {
-            Log.d(TAG, "updateProcessedFrame: ${frameData.size} bytes, ${width}x${height}")
+            // Log.d(TAG, "updateProcessedFrame: ${frameData.size} bytes, ${width}x${height}")
             pendingProcessedFrameData = frameData
             frameWidth = width
             frameHeight = height
             isProcessedFrameReady = true
             // Update aspect scale based on new frame size
             updateAspectScale()
+            // Mark that a fresh processed frame is now available
+            freshProcessedAvailable = true
         }
-        // Ensure requestRender runs on UI thread to avoid threading violations
-        glSurfaceView?.post { glSurfaceView?.requestRender() }
+        // Removed requestRender post; surface renders continuously
     }
 
     fun setShowProcessedFrame(show: Boolean) {
         Log.d(TAG, "setShowProcessedFrame: $show")
         showProcessedFrame = show
-        // Request render to reflect changes
-        glSurfaceView?.post { glSurfaceView?.requestRender() }
+        // Sticky processed mode: continue to show last processed texture without requiring fresh frames
+        requireFreshProcessedAfterToggle = false
+        // Keep freshProcessedAvailable as-is; do not reset to avoid hiding last processed frame
+        // No requestRender; continuous mode
     }
 
     fun setRotationDegrees(degrees: Int) {
-        Log.d(TAG, "setRotationDegrees: $degrees")
-        rotationDegrees = ((degrees % 360) + 360) % 360
-        glSurfaceView?.post { glSurfaceView?.requestRender() }
+        Log.d(TAG, "setRotationDegrees: $degrees (previous: $rotationDegrees)")
+        rotationDegrees = degrees
+        updateAspectScale()
+        // No requestRender; continuous mode
+    }
+
+    fun setMirrorX(mirror: Boolean) {
+        Log.d(TAG, "setMirrorX: $mirror (previous: $mirrorX)")
+        mirrorX = mirror
+        // No requestRender; continuous mode
+    }
+
+    fun setMirrorY(mirror: Boolean) {
+        Log.d(TAG, "setMirrorY: $mirror (previous: $mirrorY)")
+        mirrorY = mirror
+        // No requestRender; continuous mode
     }
 
     private fun updateAspectScale() {
@@ -478,29 +580,44 @@ class EdgeRenderer : GLSurfaceView.Renderer {
             return
         }
         val surfaceAspect = surfaceWidth.toFloat() / surfaceHeight.toFloat()
-        val frameAspect = frameWidth.toFloat() / frameHeight.toFloat()
-    
-        var scaleX = 1.0f
-        var scaleY = 1.0f
-    
-        // Auto set rotation based on orientation mismatch (landscape vs portrait)
-        val surfaceLandscape = surfaceWidth >= surfaceHeight
-        val frameLandscape = frameWidth >= frameHeight
-        val desiredRotation = if (surfaceLandscape.xor(frameLandscape)) 90 else 0
-        if (rotationDegrees != desiredRotation) {
-            rotationDegrees = desiredRotation
-        }
-    
-        if (surfaceAspect > frameAspect) {
-            // Surface is wider; pillarbox horizontally
-            scaleX = frameAspect / surfaceAspect
-            scaleY = 1.0f
+
+        // Use frame aspect considering rotation (90/270 swaps width/height)
+        val isRotated = (rotationDegrees % 180) != 0
+        val effectiveFrameAspect = if (isRotated) {
+            frameHeight.toFloat() / frameWidth.toFloat()
         } else {
-            // Surface is taller; letterbox vertically
-            scaleX = 1.0f
-            scaleY = surfaceAspect / frameAspect
+            frameWidth.toFloat() / frameHeight.toFloat()
         }
-    
+
+        var scaleX: Float
+        var scaleY: Float
+
+        if (scaleModeFill) {
+            // Center-crop fill: scale the smaller axis up to fill the surface
+            if (effectiveFrameAspect > surfaceAspect) {
+                // Frame wider than surface -> scale Y up
+                scaleX = 1.0f
+                scaleY = effectiveFrameAspect / surfaceAspect
+            } else {
+                // Frame narrower/taller than surface -> scale X up
+                scaleX = surfaceAspect / effectiveFrameAspect
+                scaleY = 1.0f
+            }
+        } else {
+            // Fit-inside: preserve aspect with letter/pillar boxing
+            if (effectiveFrameAspect > surfaceAspect) {
+                // Frame wider than surface -> pillarbox horizontally
+                scaleX = surfaceAspect / effectiveFrameAspect
+                scaleY = 1.0f
+            } else {
+                // Frame narrower/taller than surface -> letterbox vertically
+                scaleX = 1.0f
+                scaleY = effectiveFrameAspect / surfaceAspect
+            }
+        }
+
+        Log.d(TAG, "updateAspectScale: surface ${surfaceWidth}x${surfaceHeight} (aspect=$surfaceAspect), frame ${frameWidth}x${frameHeight} (rot=$rotationDegrees, effAspect=$effectiveFrameAspect), scaleX=$scaleX, scaleY=$scaleY, fillMode=$scaleModeFill")
+
         Matrix.setIdentityM(aspectScaleMatrix, 0)
         Matrix.scaleM(aspectScaleMatrix, 0, scaleX, scaleY, 1f)
     }

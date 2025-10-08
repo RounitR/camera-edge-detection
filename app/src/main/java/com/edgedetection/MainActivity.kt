@@ -13,7 +13,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Size
 import android.view.Surface
-import android.view.TextureView
+// import android.view.TextureView // removed
 import android.view.View
 import android.widget.Button
 import android.widget.SeekBar
@@ -73,11 +73,12 @@ class MainActivity : AppCompatActivity() {
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
     private var isEdgeDetectionEnabled = false
+    private var activeCameraId: String? = null
     
     // Frame capture components
     private var imageReader: ImageReader? = null
-    private val frameWidth = 640
-    private val frameHeight = 480
+    private val frameWidth = 1280
+    private val frameHeight = 720
     
     // Processing thread components
     private var processingThread: HandlerThread? = null
@@ -89,8 +90,8 @@ class MainActivity : AppCompatActivity() {
     private val processedFrameCount = AtomicLong(0)
     private var lastFpsTime = System.currentTimeMillis()
     private var lastProcessTime = System.currentTimeMillis()
-    private val targetFps = 15.0 // Target 15 FPS
-    private val minFrameInterval = (1000.0 / targetFps).toLong() // ~67ms between frames
+    private val targetFps = 15.0 // Target ~15 FPS for processing only to stabilize under load
+    private val minFrameInterval = (1000.0 / targetFps).toLong() // ~66ms between processed frames when targetFps=15
     
     // Frame data class for queue
     data class FrameData(
@@ -120,7 +121,7 @@ class MainActivity : AppCompatActivity() {
         edgeRenderer = EdgeRenderer()
         glSurfaceView.setEGLContextClientVersion(2)
         glSurfaceView.setRenderer(edgeRenderer)
-        glSurfaceView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
+        glSurfaceView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         edgeRenderer.setGLSurfaceView(glSurfaceView)
 
         // Initial state: edge detection ON, GLSurfaceView visible
@@ -185,8 +186,6 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
     }
 
-    private val textureListener = object : TextureView.SurfaceTextureListener { /* removed */ }
-
     private fun openCamera() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_REQUEST_CODE)
@@ -196,6 +195,7 @@ class MainActivity : AppCompatActivity() {
         val manager = getSystemService(CAMERA_SERVICE) as CameraManager
         try {
             val cameraId = manager.cameraIdList[0]
+            activeCameraId = cameraId
             manager.openCamera(cameraId, stateCallback, backgroundHandler)
         } catch (e: CameraAccessException) {
             e.printStackTrace()
@@ -221,7 +221,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupImageReader() {
-        imageReader = ImageReader.newInstance(frameWidth, frameHeight, ImageFormat.YUV_420_888, 2)
+        // Reduce buffer count to 1 to avoid lag from queued images; rely on acquireLatestImage
+        imageReader = ImageReader.newInstance(frameWidth, frameHeight, ImageFormat.YUV_420_888, 1)
         imageReader?.setOnImageAvailableListener(imageAvailableListener, backgroundHandler)
     }
     
@@ -234,12 +235,9 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun processFrame(image: Image) {
-        // Always enqueue original frame for renderer; processing only if enabled
+        // Always enqueue/update original frame to renderer at full rate; throttle only processed frames
         val currentTime = System.currentTimeMillis()
         frameCount.incrementAndGet()
-        if (currentTime - lastProcessTime < minFrameInterval) {
-            return
-        }
         try {
             val planes = image.planes
             val yPlane = planes[0]
@@ -247,18 +245,31 @@ class MainActivity : AppCompatActivity() {
             val ySize = yBuffer.remaining()
             val yArray = ByteArray(ySize)
             yBuffer.get(yArray)
-            val frameData = FrameData(
+            // Update original frame immediately for smooth preview
+            edgeRenderer.updateOriginalFrame(
                 yArray,
                 image.width,
                 image.height,
-                yPlane.rowStride,
-                yPlane.pixelStride,
-                currentTime
+                yPlane.rowStride
             )
-            if (!frameQueue.offer(frameData)) {
-                android.util.Log.d("MainActivity", "Frame queue full, dropping frame")
+            // Clear pending processed to avoid showing stale frames when toggling rapidly
+            if (!isEdgeDetectionEnabled) {
+                // If disabled, do not enqueue processed frames
+            } else if (currentTime - lastProcessTime >= minFrameInterval) {
+                val frameData = FrameData(
+                    yArray,
+                    image.width,
+                    image.height,
+                    yPlane.rowStride,
+                    yPlane.pixelStride,
+                    currentTime
+                )
+                frameQueue.poll() // drop any queued older frame to minimize latency
+                if (!frameQueue.offer(frameData)) {
+                    android.util.Log.d("MainActivity", "Frame queue full, dropping processed frame")
+                }
+                lastProcessTime = currentTime
             }
-            lastProcessTime = currentTime
         } catch (e: Exception) {
             android.util.Log.e("MainActivity", "Error processing frame: ${e.message}")
         }
@@ -280,6 +291,8 @@ class MainActivity : AppCompatActivity() {
                         if (cameraDevice == null) return
                         captureSession = session
                         updatePreview(captureRequestBuilder)
+                        // Update renderer orientation once the session is configured
+                        updateRendererOrientation()
                     }
 
                     override fun onConfigureFailed(session: CameraCaptureSession) {
@@ -293,11 +306,57 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun updatePreview(captureRequestBuilder: CaptureRequest.Builder?) {
-        if (cameraDevice == null) return
+    private fun updateRendererOrientation() {
         try {
-            captureRequestBuilder?.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-            captureSession?.setRepeatingRequest(captureRequestBuilder?.build()!!, null, backgroundHandler)
+            val camId = activeCameraId ?: return
+            android.util.Log.d("MainActivity", "updateRendererOrientation: Starting with camId=$camId")
+            val manager = getSystemService(CAMERA_SERVICE) as CameraManager
+            val characteristics = manager.getCameraCharacteristics(camId)
+            val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+            val lensFacing = characteristics.get(CameraCharacteristics.LENS_FACING)
+            val displayRotation = windowManager.defaultDisplay.rotation
+            android.util.Log.d("MainActivity", "updateRendererOrientation: sensorOrientation=$sensorOrientation, lensFacing=$lensFacing, displayRotation=$displayRotation")
+            val deviceRotationDegrees = when (displayRotation) {
+                Surface.ROTATION_0 -> 0
+                Surface.ROTATION_90 -> 90
+                Surface.ROTATION_180 -> 180
+                Surface.ROTATION_270 -> 270
+                else -> 0
+            }
+            val totalRotation = if (lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
+                (sensorOrientation + deviceRotationDegrees) % 360
+            } else {
+                // Back camera: use standard calculation without mirroring
+                (sensorOrientation - deviceRotationDegrees + 360) % 360
+            }
+            android.util.Log.d("MainActivity", "Orientation update: camId=$camId, sensorOrientation=$sensorOrientation, lensFacing=$lensFacing, deviceRotationDegrees=$deviceRotationDegrees, totalRotation=$totalRotation")
+            edgeRenderer.setRotationDegrees(totalRotation)
+            // Mirror horizontally only for front camera (selfie view)
+            val mirror = when (lensFacing) {
+                CameraCharacteristics.LENS_FACING_FRONT -> true
+                CameraCharacteristics.LENS_FACING_BACK -> false
+                else -> false
+            }
+            android.util.Log.d("MainActivity", "updateRendererOrientation: Setting mirror=$mirror for lensFacing=$lensFacing")
+            edgeRenderer.setMirrorX(mirror)
+            // Also control vertical mirroring to correct upside-down previews for back camera
+            val mirrorY = when (lensFacing) {
+                CameraCharacteristics.LENS_FACING_FRONT -> false
+                CameraCharacteristics.LENS_FACING_BACK -> true
+                else -> false
+            }
+            android.util.Log.d("MainActivity", "updateRendererOrientation: Setting mirrorY=$mirrorY for lensFacing=$lensFacing")
+            edgeRenderer.setMirrorY(mirrorY)
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Failed to update renderer orientation: ${e.message}")
+        }
+    }
+
+    private fun updatePreview(captureRequestBuilder: CaptureRequest.Builder?) {
+        if (cameraDevice == null || captureRequestBuilder == null) return
+        try {
+            captureRequestBuilder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+            captureSession?.setRepeatingRequest(captureRequestBuilder.build(), null, backgroundHandler)
         } catch (e: CameraAccessException) {
             e.printStackTrace()
         }
@@ -337,12 +396,6 @@ class MainActivity : AppCompatActivity() {
         override fun run() {
             try {
                 val frameData = frameQueue.take()
-                edgeRenderer.updateOriginalFrame(
-                    frameData.data,
-                    frameData.width,
-                    frameData.height,
-                    frameData.rowStride
-                )
                 if (isEdgeDetectionEnabled) {
                     try {
                         val nativeResult = processFrameAndReturn(
@@ -359,13 +412,16 @@ class MainActivity : AppCompatActivity() {
                         android.util.Log.e("MainActivity", "Native processing error: ${e.message}")
                     }
                 }
+                // Throttle re-posting to approximate target processed FPS under load
+                val delayMs = minFrameInterval
+                processingHandler?.postDelayed(this, delayMs)
                 processedFrameCount.incrementAndGet()
-                processingHandler?.post(this)
             } catch (e: InterruptedException) {
                 android.util.Log.d("MainActivity", "Processing thread interrupted")
             } catch (e: Exception) {
                 android.util.Log.e("MainActivity", "Error in processing thread: ${e.message}")
-                processingHandler?.post(this)
+                // Reschedule with delay to avoid tight loop on errors
+                processingHandler?.postDelayed(this, minFrameInterval)
             }
         }
     }
