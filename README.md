@@ -72,14 +72,16 @@ A minimal Android application that captures camera frames, processes them using 
 - CORS headers are enabled on the device server for GET/POST/OPTIONS
 
 ## Screenshots
-(Place your project screenshots here.)
-- Screenshot 1: [add image]
-- Screenshot 2: [add image]
+Below is the web viewer screenshot:
+
+- ![Web Viewer](docs/media/screenshots/web-viewer.png)
+
 
 ## Video Demos
-(Place your demo video links or embeds here.)
-- Demo 1: [add link]
-- Demo 2: [add link]
+App demo video:
+
+- <video src="docs/media/demos/app-demo.mp4" controls width="720"></video>
+
 
 ## Development
 Potential enhancements:
