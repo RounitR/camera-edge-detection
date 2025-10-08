@@ -74,6 +74,8 @@ class MainActivity : AppCompatActivity() {
     private var backgroundHandler: Handler? = null
     private var isEdgeDetectionEnabled = false
     private var activeCameraId: String? = null
+    private lateinit var fpsTextView: TextView
+    private var uiHandler: Handler? = null
     
     // Frame capture components
     private var imageReader: ImageReader? = null
@@ -116,6 +118,7 @@ class MainActivity : AppCompatActivity() {
         toggleButton = findViewById(R.id.toggleButton)
         val lowSeek: SeekBar = findViewById(R.id.lowThresholdSeekBar)
         val highSeek: SeekBar = findViewById(R.id.highThresholdSeekBar)
+        fpsTextView = findViewById(R.id.fpsText)
 
         // Initialize OpenGL renderer
         edgeRenderer = EdgeRenderer()
@@ -139,7 +142,7 @@ class MainActivity : AppCompatActivity() {
         lowSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 findViewById<android.widget.TextView>(R.id.lowThresholdLabel).text = "Low Threshold: $progress"
-                setCannyThresholds(progress.toDouble(), highSeek.progress.toDouble())
+                safeSetCannyThresholds(progress.toDouble(), highSeek.progress.toDouble())
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
@@ -147,7 +150,7 @@ class MainActivity : AppCompatActivity() {
         highSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 findViewById<android.widget.TextView>(R.id.highThresholdLabel).text = "High Threshold: $progress"
-                setCannyThresholds(lowSeek.progress.toDouble(), progress.toDouble())
+                safeSetCannyThresholds(lowSeek.progress.toDouble(), progress.toDouble())
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
@@ -174,8 +177,11 @@ class MainActivity : AppCompatActivity() {
         // No TextureView. Open camera immediately.
         openCamera()
         glSurfaceView.onResume()
-        setCannyThresholds(findViewById<SeekBar>(R.id.lowThresholdSeekBar).progress.toDouble(),
+        safeSetCannyThresholds(findViewById<SeekBar>(R.id.lowThresholdSeekBar).progress.toDouble(),
             findViewById<SeekBar>(R.id.highThresholdSeekBar).progress.toDouble())
+        // Start FPS overlay updates
+        uiHandler = Handler(mainLooper)
+        uiHandler?.post(fpsUpdateRunnable)
     }
 
     override fun onPause() {
@@ -459,4 +465,32 @@ class MainActivity : AppCompatActivity() {
      * A native method that is implemented by the 'edgedetection' native library,
      * which is packaged with this app.
      */
+    private val fpsUpdateRunnable = object : Runnable {
+        override fun run() {
+            try {
+                val now = System.currentTimeMillis()
+                val elapsed = now - lastFpsTime
+                if (elapsed >= 1000) {
+                    val camFps = frameCount.get().toDouble() * 1000.0 / elapsed.toDouble()
+                    val procFps = processedFrameCount.get().toDouble() * 1000.0 / elapsed.toDouble()
+                    fpsTextView.text = String.format("Cam FPS: %.1f | Proc FPS: %.1f", camFps, procFps)
+                    frameCount.set(0)
+                    processedFrameCount.set(0)
+                    lastFpsTime = now
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("MainActivity", "FPS overlay update error: ${e.message}")
+            } finally {
+                uiHandler?.postDelayed(this, 500)
+            }
+        }
+    }
+
+    private fun safeSetCannyThresholds(low: Double, high: Double) {
+        try {
+            setCannyThresholds(low, high)
+        } catch (t: Throwable) {
+            android.util.Log.e("MainActivity", "setCannyThresholds error: ${t.message}")
+        }
+    }
 }

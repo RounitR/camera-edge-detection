@@ -74,4 +74,17 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
+    <!-- FPS overlay -->
+    <TextView
+        android:id="@+id/fpsText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Cam FPS: 0.0 | Proc FPS: 0.0"
+        android:textColor="#FFFFFF"
+        android:background="#66000000"
+        android:padding="8dp"
+        app:layout_constraintTop_toTopOf="@+id/glSurfaceView"
+        app:layout_constraintStart_toStartOf="parent"
+        android:layout_margin="12dp" />
+
 </androidx.constraintlayout.widget.ConstraintLayout>

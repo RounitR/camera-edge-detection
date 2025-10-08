@@ -519,40 +519,40 @@ class EdgeRenderer : GLSurfaceView.Renderer {
     // Public methods for updating frame data
     fun updateOriginalFrame(frameData: ByteArray, width: Int, height: Int, rowStride: Int) {
         synchronized(this) {
-            // Log.d(TAG, "updateOriginalFrame: ${frameData.size} bytes, ${width}x${height}, rowStride=$rowStride")
-            pendingOriginalFrameData = frameData
-            frameWidth = width
-            frameHeight = height
-            originalRowStride = rowStride
-            isOriginalFrameReady = true
-            // Update aspect scale based on new frame size
-            updateAspectScale()
+            try {
+                pendingOriginalFrameData = frameData
+                frameWidth = width
+                frameHeight = height
+                originalRowStride = rowStride
+                isOriginalFrameReady = true
+                updateAspectScale()
+            } catch (t: Throwable) {
+                Log.e(TAG, "updateOriginalFrame error: ${t.message}")
+                isOriginalFrameReady = false
+            }
         }
-        // Removed requestRender post; surface renders continuously
     }
 
     fun updateProcessedFrame(frameData: ByteArray, width: Int, height: Int) {
         synchronized(this) {
-            // Log.d(TAG, "updateProcessedFrame: ${frameData.size} bytes, ${width}x${height}")
-            pendingProcessedFrameData = frameData
-            frameWidth = width
-            frameHeight = height
-            isProcessedFrameReady = true
-            // Update aspect scale based on new frame size
-            updateAspectScale()
-            // Mark that a fresh processed frame is now available
-            freshProcessedAvailable = true
+            try {
+                pendingProcessedFrameData = frameData
+                frameWidth = width
+                frameHeight = height
+                isProcessedFrameReady = true
+                updateAspectScale()
+                freshProcessedAvailable = true
+            } catch (t: Throwable) {
+                Log.e(TAG, "updateProcessedFrame error: ${t.message}")
+                isProcessedFrameReady = false
+            }
         }
-        // Removed requestRender post; surface renders continuously
     }
 
     fun setShowProcessedFrame(show: Boolean) {
         Log.d(TAG, "setShowProcessedFrame: $show")
         showProcessedFrame = show
-        // Sticky processed mode: continue to show last processed texture without requiring fresh frames
         requireFreshProcessedAfterToggle = false
-        // Keep freshProcessedAvailable as-is; do not reset to avoid hiding last processed frame
-        // No requestRender; continuous mode
     }
 
     fun setRotationDegrees(degrees: Int) {
