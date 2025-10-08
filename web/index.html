@@ -13,7 +13,13 @@
 
   <main>
     <section class="viewer">
+      <div class="server-input">
+        <label for="serverUrl">Device Server URL:</label>
+        <input id="serverUrl" type="text" placeholder="http://<device-ip>:8081" />
+        <button id="connectBtn" class="secondary">Connect</button>
+      </div>
       <div id="preview" class="preview">
+        <img id="streamImg" alt="Processed frame" style="display:none" />
         <div class="placeholder">No stream connected</div>
       </div>
     </section>
