@@ -85,3 +85,9 @@ lint/generated/
 lint/outputs/
 lint/tmp/
 # lint/reports/
+# Ignore web dependencies and build caches
+web/node_modules/
+web/.cache/
+web/.vite/
+# Optional: ignore local dev server logs
+web/npm-debug.log*
