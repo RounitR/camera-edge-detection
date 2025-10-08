@@ -80,7 +80,7 @@ Below is the web viewer screenshot:
 ## Video Demos
 App demo video:
 
-- <video src="docs/media/demos/app-demo.mp4" controls width="720"></video>
+- <video src="https://raw.githubusercontent.com/RounitR/camera-edge-detection/master/docs/media/demos/app-demo.mp4" controls width="720"></video>
 
 
 ## Development
